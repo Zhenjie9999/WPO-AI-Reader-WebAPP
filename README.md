@@ -31,6 +31,8 @@ python -m pytest -q
 
 The first recommended deployment target is Render free Web Service with Docker.
 
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/Zhenjie9999/WPO-AI-Reader-WebAPP)
+
 Required environment variables:
 
 - `WPO_INVITE_CODE=WPO2026ZHEN`
