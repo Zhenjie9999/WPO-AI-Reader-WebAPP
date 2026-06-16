@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>WPO AI Reader</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-mark">W</div>
+          <div>
+            <p class="eyebrow">Private beta</p>
+            <h1>WPO AI Reader</h1>
+          </div>
+        </div>
+
+        <section class="panel step-panel" id="invitePanel">
+          <div class="panel-heading">
+            <span class="step">01</span>
+            <div>
+              <h2>邀请码</h2>
+              <p>输入邀请密码后进入试用。</p>
+            </div>
+          </div>
+          <input id="inviteCodeInput" type="password" autocomplete="off" placeholder="邀请码" />
+          <button id="inviteButton" class="primary" type="button">进入应用</button>
+        </section>
+
+        <section class="panel step-panel locked" id="aiPanel">
+          <div class="panel-heading">
+            <span class="step">02</span>
+            <div>
+              <h2>AI 配置</h2>
+              <p>使用你自己的兼容 Chat Completions API。</p>
+            </div>
+          </div>
+          <select id="apiPresetSelect" aria-label="AI provider preset">
+            <option value="custom">Custom</option>
+            <option value="openai">OpenAI compatible</option>
+            <option value="deepseek">DeepSeek</option>
+            <option value="doubao">Doubao</option>
+          </select>
+          <input id="aiBaseUrlInput" type="url" autocomplete="url" placeholder="API endpoint" />
+          <input id="aiModelInput" type="text" autocomplete="off" placeholder="Model name" />
+          <input id="aiApiKeyInput" type="password" autocomplete="off" placeholder="API Key" />
+          <div class="button-row">
+            <button id="saveAiButton" class="primary" type="button">测试并保存</button>
+            <button id="clearAiButton" class="secondary" type="button">清除</button>
+          </div>
+          <p class="hint">API Key 只保存在当前浏览器和本次服务器会话中。</p>
+          <div id="aiStatusText" class="status-pill">等待配置</div>
+        </section>
+
+        <section class="panel step-panel locked" id="loginPanel">
+          <div class="panel-heading">
+            <span class="step">03</span>
+            <div>
+              <h2>Worldpanel 登录</h2>
+              <p>系统只通过你的授权账号读取页面数据。</p>
+            </div>
+          </div>
+          <input id="emailInput" type="email" autocomplete="username" placeholder="Worldpanel 账号" />
+          <input id="passwordInput" type="password" autocomplete="current-password" placeholder="Worldpanel 密码" />
+          <button id="loginButton" class="primary" type="button">登录并读取 Report Set</button>
+        </section>
+
+        <section class="panel step-panel locked" id="reportPanel">
+          <div class="panel-heading">
+            <span class="step">04</span>
+            <div>
+              <h2>报表范围</h2>
+              <p>选择 Report Set 和 Ready-to-Use Report。</p>
+            </div>
+          </div>
+          <select id="reportSetSelect" aria-label="Report Set"></select>
+          <button id="enterButton" class="secondary" type="button" disabled>进入 Report</button>
+          <select id="categorySelect" aria-label="Ready-to-Use category"></select>
+          <button id="loadCategoryButton" class="secondary" type="button" disabled>应用分类</button>
+          <select id="reportSelect" aria-label="Ready-to-Use report"></select>
+          <label class="checkline">
+            <input id="allKpisInput" type="checkbox" />
+            <span>预读全部 KPI</span>
+          </label>
+          <button id="refreshButton" class="primary" type="button" disabled>准备所选报表</button>
+        </section>
+      </aside>
+
+      <section class="workspace">
+        <header class="topbar">
+          <div>
+            <p class="eyebrow">Natural language data access</p>
+            <h2>用自然语言读取 Worldpanel Online 数据</h2>
+          </div>
+          <div class="top-actions">
+            <button id="copyAnswerButton" class="secondary compact" type="button" disabled>复制答案</button>
+            <button id="downloadCsvButton" class="secondary compact" type="button" disabled>下载 CSV</button>
+            <button id="checkButton" class="secondary compact" type="button" disabled>检查数据</button>
+          </div>
+        </header>
+
+        <div class="context-bar">
+          <div id="statusText">等待邀请码</div>
+          <div id="aiText">AI 未配置</div>
+        </div>
+
+        <div id="messages" class="messages"></div>
+
+        <form id="askForm" class="composer">
+          <input
+            id="questionInput"
+            type="text"
+            autocomplete="off"
+            placeholder="例如：Coke TM 在 2025 全年 Hyper 渠道的销售额、销量和渗透率是多少？"
+          />
+          <button type="submit">发送</button>
+        </form>
+      </section>
+    </main>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>

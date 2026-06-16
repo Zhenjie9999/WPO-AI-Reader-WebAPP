@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: wpo-ai-reader-webapp
+    env: docker
+    plan: free
+    autoDeploy: true
+    envVars:
+      - key: WPO_INVITE_CODE
+        value: WPO2026ZHEN
+      - key: WPO_ENABLE_ENV_LOGIN
+        value: "false"
+      - key: WORLDPANEL_HEADLESS
+        value: "true"
