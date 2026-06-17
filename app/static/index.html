@@ -12,7 +12,7 @@
         <div class="brand">
           <div class="brand-mark">W</div>
           <div>
-            <p class="eyebrow">Private beta</p>
+            <p class="eyebrow">私有试用 / Private Beta</p>
             <h1>WPO AI Reader</h1>
           </div>
         </div>
@@ -21,102 +21,103 @@
           <div class="panel-heading">
             <span class="step">01</span>
             <div>
-              <h2>邀请码</h2>
-              <p>输入邀请密码后进入试用。</p>
+              <h2>邀请码 / Invite Code</h2>
+              <p>输入邀请码后进入公开试用。 / Enter the invite code to continue.</p>
             </div>
           </div>
-          <input id="inviteCodeInput" type="password" autocomplete="off" placeholder="邀请码" />
-          <button id="inviteButton" class="primary" type="button">进入应用</button>
+          <input id="inviteCodeInput" type="password" autocomplete="off" placeholder="邀请码 / Invite code" />
+          <button id="inviteButton" class="primary" type="button">进入应用 / Enter App</button>
         </section>
 
         <section class="panel step-panel locked" id="aiPanel">
           <div class="panel-heading">
             <span class="step">02</span>
             <div>
-              <h2>AI 配置</h2>
-              <p>使用你自己的兼容 Chat Completions API。</p>
+              <h2>AI 配置 / AI Setup</h2>
+              <p>使用你自己的兼容 Chat Completions API。 / Use your own compatible Chat Completions API.</p>
             </div>
           </div>
           <select id="apiPresetSelect" aria-label="AI provider preset">
-            <option value="custom">Custom</option>
-            <option value="openai">OpenAI compatible</option>
-            <option value="deepseek">DeepSeek</option>
-            <option value="doubao">Doubao</option>
+            <option value="custom">自定义 / Custom</option>
+            <option value="openai">OpenAI 兼容 / OpenAI compatible</option>
+            <option value="deepseek">DeepSeek / 深度求索</option>
+            <option value="doubao">豆包 / Doubao</option>
           </select>
-          <input id="aiBaseUrlInput" type="url" autocomplete="url" placeholder="API endpoint" />
-          <input id="aiModelInput" type="text" autocomplete="off" placeholder="Model name" />
-          <input id="aiApiKeyInput" type="password" autocomplete="off" placeholder="API Key" />
+          <input id="aiBaseUrlInput" type="url" autocomplete="url" placeholder="接入点 / API endpoint" />
+          <input id="aiModelInput" type="text" autocomplete="off" placeholder="模型名称 / Model name" />
+          <input id="aiApiKeyInput" type="password" autocomplete="off" placeholder="API Key / 密钥" />
           <div class="button-row">
-            <button id="saveAiButton" class="primary" type="button">测试并保存</button>
-            <button id="clearAiButton" class="secondary" type="button">清除</button>
+            <button id="saveAiButton" class="primary" type="button">测试并保存 / Test & Save</button>
+            <button id="clearAiButton" class="secondary" type="button">清除 / Clear</button>
           </div>
-          <p class="hint">API Key 只保存在当前浏览器和本次服务器会话中。</p>
-          <div id="aiStatusText" class="status-pill">等待配置</div>
+          <p class="hint">API Key 保存在当前浏览器和本次会话中。 / The key stays in this browser and session.</p>
+          <div id="aiStatusText" class="status-pill">等待配置 / Waiting for setup</div>
         </section>
 
         <section class="panel step-panel locked" id="loginPanel">
           <div class="panel-heading">
             <span class="step">03</span>
             <div>
-              <h2>Worldpanel 登录</h2>
-              <p>系统只通过你的授权账号读取页面数据。</p>
+              <h2>Worldpanel 登录 / Login</h2>
+              <p>只通过你的授权账户读取页面数据。 / Data is read only through your authorized account.</p>
             </div>
           </div>
-          <input id="emailInput" type="email" autocomplete="username" placeholder="Worldpanel 账号" />
-          <input id="passwordInput" type="password" autocomplete="current-password" placeholder="Worldpanel 密码" />
-          <button id="loginButton" class="primary" type="button">登录并读取 Report Set</button>
+          <input id="emailInput" type="email" autocomplete="username" placeholder="Worldpanel 账号 / Email" />
+          <input id="passwordInput" type="password" autocomplete="current-password" placeholder="Worldpanel 密码 / Password" />
+          <button id="loginButton" class="primary" type="button">登录并读取 / Login & Load</button>
         </section>
 
         <section class="panel step-panel locked" id="reportPanel">
           <div class="panel-heading">
             <span class="step">04</span>
             <div>
-              <h2>报表范围</h2>
-              <p>选择 Report Set 和 Ready-to-Use Report。</p>
+              <h2>报表范围 / Report Scope</h2>
+              <p>选择 Report Set 和 Ready-to-Use Report。 / Choose a report set and a ready-to-use report.</p>
             </div>
           </div>
           <select id="reportSetSelect" aria-label="Report Set"></select>
-          <button id="enterButton" class="secondary" type="button" disabled>进入 Report</button>
+          <button id="enterButton" class="secondary" type="button" disabled>进入 Report / Enter Report</button>
           <select id="categorySelect" aria-label="Ready-to-Use category"></select>
-          <button id="loadCategoryButton" class="secondary" type="button" disabled>应用分类</button>
+          <button id="loadCategoryButton" class="secondary" type="button" disabled>应用分类 / Apply Category</button>
           <select id="reportSelect" aria-label="Ready-to-Use report"></select>
           <label class="checkline">
             <input id="allKpisInput" type="checkbox" />
-            <span>预读全部 KPI</span>
+            <span>预读全部 KPI / Preload all KPIs</span>
           </label>
-          <button id="refreshButton" class="primary" type="button" disabled>准备所选报表</button>
+          <button id="refreshButton" class="primary" type="button" disabled>准备所选报表 / Prepare Report</button>
         </section>
       </aside>
 
       <section class="workspace">
         <header class="topbar">
           <div>
-            <p class="eyebrow">Natural language data access</p>
+            <p class="eyebrow">自然语言数据读取 / Natural Language Data Access</p>
             <h2>用自然语言读取 Worldpanel Online 数据</h2>
+            <p class="subhead">Ask questions, let the app operate Pivot Screen, then receive a verified data answer.</p>
           </div>
           <div class="top-actions">
-            <button id="discoverButton" class="secondary compact" type="button" disabled>查看维度/下拉框</button>
-            <button id="copyAnswerButton" class="secondary compact" type="button" disabled>复制答案</button>
-            <button id="downloadCsvButton" class="secondary compact" type="button" disabled>下载 CSV</button>
-            <button id="checkButton" class="secondary compact" type="button" disabled>检查数据</button>
+            <button id="discoverButton" class="secondary compact" type="button" disabled>查看维度/下拉框 / Discover</button>
+            <button id="copyAnswerButton" class="secondary compact" type="button" disabled>复制答案 / Copy</button>
+            <button id="downloadCsvButton" class="secondary compact" type="button" disabled>下载 CSV / CSV</button>
+            <button id="checkButton" class="secondary compact" type="button" disabled>检查数据 / Check</button>
           </div>
         </header>
 
         <div class="context-bar">
-          <div id="statusText">等待邀请码</div>
-          <div id="aiText">AI 未配置</div>
+          <div id="statusText">等待邀请码 / Waiting for invite code</div>
+          <div id="aiText">AI 未配置 / AI not configured</div>
         </div>
 
         <section id="progressBoard" class="progress-board idle" aria-live="polite">
           <div class="progress-head">
             <div>
-              <p class="eyebrow">Data pull progress</p>
-              <h3 id="progressTitle">等待任务</h3>
+              <p class="eyebrow">拉取进度 / Data Pull Progress</p>
+              <h3 id="progressTitle">等待任务 / Idle</h3>
             </div>
             <div id="progressElapsed" class="progress-elapsed">00:00</div>
           </div>
           <ol id="progressList" class="progress-list">
-            <li class="progress-empty">还没有正在执行的数据拉取任务。</li>
+            <li class="progress-empty">还没有正在执行的数据拉取任务。 / No active data pull yet.</li>
           </ol>
         </section>
 
@@ -127,9 +128,9 @@
             id="questionInput"
             type="text"
             autocomplete="off"
-            placeholder="例如：Coke TM 在 2025 全年 Hyper 渠道的销售额、销量和渗透率是多少？"
+            placeholder="例如 / Example: Coke TM 在 2025 全年 Hyper 渠道的销售额、销量和渗透率是多少？"
           />
-          <button type="submit">发送</button>
+          <button type="submit">发送 / Send</button>
         </form>
       </section>
     </main>

@@ -12,6 +12,7 @@ class AISettings:
     model: str
     api_key: str | None
     base_url: str
+    endpoint_id: str | None = None
     timeout_seconds: float = 60.0
 
     @property
@@ -26,12 +27,15 @@ def build_ai_status(settings: AISettings) -> dict[str, object]:
             "model": "built-in",
             "enabled": False,
         }
-    return {
+    status = {
         "provider": settings.provider,
         "model": settings.model,
         "enabled": True,
         "base_url": settings.base_url,
     }
+    if settings.endpoint_id:
+        status["endpoint_id"] = settings.endpoint_id
+    return status
 
 
 def summarize_check_with_shared_ai(local_summary: str, ai_settings: AISettings) -> str:
@@ -53,7 +57,7 @@ class AssistantClient:
             raise RuntimeError("AI API is not configured")
 
         payload = {
-            "model": self.settings.model,
+            "model": self.settings.endpoint_id or self.settings.model,
             "messages": [{"role": "user", "content": prompt}],
         }
         headers = {

@@ -1,0 +1,15 @@
+.git
+.github
+.pytest_cache
+__pycache__
+*.py[cod]
+.env
+.env.*
+runtime
+node_modules
+dist
+build
+*.log
+*.zip
+*.csv
+docs/verification

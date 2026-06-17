@@ -126,6 +126,7 @@ class AIConfigurationRequest(BaseModel):
     model: str
     api_key: str
     provider: str = "custom"
+    endpoint_id: str | None = None
     access_token: str | None = None
 
 
@@ -161,6 +162,7 @@ async def health() -> dict[str, object]:
             "base_url": settings.ai.base_url,
             "model": settings.ai.model,
             "provider": settings.ai.provider,
+            "endpoint_id": settings.ai.endpoint_id,
         },
         "has_cached_data": has_session_cache or _cached_table is not None,
         "cached_report": _cached_report,
@@ -835,6 +837,7 @@ def _ai_settings(request: AIConfigurationRequest) -> AISettings:
         model=model,
         api_key=api_key,
         base_url=base_url,
+        endpoint_id=request.endpoint_id.strip() if request.endpoint_id else None,
         timeout_seconds=get_settings().ai.timeout_seconds,
     )
 

@@ -217,7 +217,7 @@ const AI_PRESETS = {
   custom: { label: "Custom", baseUrl: "", model: "" },
   openai: { label: "OpenAI compatible", baseUrl: "https://api.openai.com/v1/chat/completions", model: "gpt-4.1" },
   deepseek: { label: "DeepSeek", baseUrl: "https://api.deepseek.com/chat/completions", model: "deepseek-chat" },
-  doubao: { label: "Doubao", baseUrl: "https://ark.cn-beijing.volces.com/api/v3/chat/completions", model: "doubao-seed-1-6-250615" },
+  doubao: { label: "Doubao", baseUrl: "https://ark.cn-beijing.volces.com/api/v3/chat/completions", model: "doubao-seed-2.0-lite" },
 };
 ```
 

@@ -33,6 +33,16 @@ class Settings:
 
 
 def get_settings() -> Settings:
+    ai_endpoint_id = _env("WPO_DEFAULT_AI_ENDPOINT_ID") or _env("ARK_ENDPOINT_ID")
+    ai_api_key = _env("WPO_DEFAULT_AI_API_KEY") or _env("ARK_API_KEY") or None
+    ai_model = _env("WPO_DEFAULT_AI_MODEL") or ("doubao-seed-2.0-lite" if ai_endpoint_id else "")
+    ai_base_url = _env("WPO_DEFAULT_AI_BASE_URL") or (
+        "https://ark.cn-beijing.volces.com/api/v3/chat/completions"
+        if ai_endpoint_id or ai_api_key
+        else ""
+    )
+    ai_provider = _env("WPO_DEFAULT_AI_PROVIDER") or ("doubao" if ai_endpoint_id else "custom")
+
     return Settings(
         email=os.getenv("WORLDPANEL_EMAIL"),
         password=os.getenv("WORLDPANEL_PASSWORD"),
@@ -47,10 +57,15 @@ def get_settings() -> Settings:
             if origin.strip()
         ),
         ai=AISettings(
-            provider="custom",
-            model="",
-            api_key=None,
-            base_url="",
+            provider=ai_provider,
+            model=ai_model,
+            api_key=ai_api_key,
+            base_url=ai_base_url,
+            endpoint_id=ai_endpoint_id or None,
             timeout_seconds=60,
         ),
     )
+
+
+def _env(name: str) -> str:
+    return os.getenv(name, "").strip()

@@ -38,21 +38,21 @@ const progressList = document.querySelector("#progressList");
 const ACCESS_STORAGE_KEY = "wpo-access-token";
 const AI_STORAGE_KEY = "wpo-ai-configuration";
 const AI_PRESETS = {
-  custom: { label: "Custom", baseUrl: "", model: "" },
+  custom: { label: "自定义 / Custom", baseUrl: "", model: "" },
   openai: {
-    label: "OpenAI compatible",
+    label: "OpenAI 兼容 / OpenAI compatible",
     baseUrl: "https://api.openai.com/v1/chat/completions",
     model: "gpt-4.1",
   },
   deepseek: {
-    label: "DeepSeek",
+    label: "DeepSeek / 深度求索",
     baseUrl: "https://api.deepseek.com/chat/completions",
     model: "deepseek-chat",
   },
   doubao: {
-    label: "Doubao",
+    label: "豆包 / Doubao",
     baseUrl: "https://ark.cn-beijing.volces.com/api/v3/chat/completions",
-    model: "doubao-seed-1-6-250615",
+    model: "doubao-seed-2.0-lite",
   },
 };
 
@@ -81,7 +81,7 @@ function startProgress(title, steps = []) {
   startProgressPolling();
 }
 
-function finishProgress(status = "done", message = "完成") {
+function finishProgress(status = "done", message = "完成 / Done") {
   renderProgressEvents([{ status, message }], true);
   progressBoard.classList.remove("active", "idle");
   progressBoard.classList.add(status === "error" ? "error" : "complete");
@@ -104,7 +104,7 @@ function renderProgressEvents(events, append = false) {
     dot.className = "progress-dot";
     const message = document.createElement("span");
     message.className = "progress-message";
-    message.textContent = event.message || "Working...";
+    message.textContent = event.message || "处理中 / Working...";
     item.appendChild(dot);
     item.appendChild(message);
     progressList.appendChild(item);
@@ -140,7 +140,7 @@ async function loadProgress() {
   const result = await requestJson(`/api/sessions/${sessionId}/progress`);
   const events = result.events || [];
   if (events.length) {
-    progressTitle.textContent = result.current || "Working...";
+    progressTitle.textContent = result.current || "处理中 / Working...";
     renderProgressEvents(events);
     progressBoard.classList.remove("idle");
     progressBoard.classList.toggle("active", result.active);
@@ -191,7 +191,7 @@ async function requestJson(url, options = {}) {
   const response = await fetch(url, options);
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) {
-    throw new Error(payload.detail || "请求失败");
+    throw new Error(payload.detail || "请求失败 / Request failed");
   }
   return payload;
 }
@@ -222,7 +222,7 @@ function restoreAiConfiguration() {
     aiBaseUrlInput.value = saved.base_url || "";
     aiModelInput.value = saved.model || "";
     aiApiKeyInput.value = saved.api_key || "";
-    aiStatusText.textContent = "已恢复浏览器保存的 AI 配置";
+    aiStatusText.textContent = "已恢复浏览器保存的 AI 配置 / Restored saved AI setup";
   } catch {
     localStorage.removeItem(AI_STORAGE_KEY);
   }
@@ -242,23 +242,23 @@ async function bindSavedAiConfiguration() {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(currentAiConfiguration()),
   });
-  aiStatusText.textContent = `AI 可用：${result.ai.provider} / ${result.ai.model}`;
-  aiText.textContent = `AI：${result.ai.provider} / ${result.ai.model}`;
+  aiStatusText.textContent = `AI 可用 / Ready: ${result.ai.provider} / ${result.ai.model}`;
+  aiText.textContent = `AI: ${result.ai.provider} / ${result.ai.model}`;
 }
 
 inviteButton.addEventListener("click", async () => {
   inviteButton.disabled = true;
-  startProgress("Invite access", [{ status: "running", message: "Checking invite code" }]);
-  setStatus("正在验证邀请码...");
+  startProgress("Invite access / 邀请码验证", [{ status: "running", message: "Checking invite code / 正在验证邀请码" }]);
+  setStatus("正在验证邀请码 / Checking invite code...");
   try {
     const result = await postJson("/api/access", { invite_code: inviteCodeInput.value.trim() });
     accessToken = result.access_token;
     localStorage.setItem(ACCESS_STORAGE_KEY, accessToken);
     unlock(aiPanel);
     unlock(loginPanel);
-    finishProgress("done", "Invite accepted");
-    setStatus("邀请码已通过，请配置 AI 并登录 Worldpanel");
-    addMessage("assistant", "欢迎使用 WPO AI Reader。请先配置你的 AI API，然后登录 Worldpanel Online。");
+    finishProgress("done", "Invite accepted / 邀请码已通过");
+    setStatus("邀请码已通过，请配置 AI 并登录 Worldpanel / Invite accepted. Configure AI and log in.");
+    addMessage("assistant", "欢迎使用 WPO AI Reader。请先配置你的 AI API，然后登录 Worldpanel Online。\nWelcome. Configure your AI API first, then log in to Worldpanel Online.");
   } catch (error) {
     finishProgress("error", error.message);
     setStatus(error.message);
@@ -271,20 +271,20 @@ apiPresetSelect.addEventListener("change", () => applyPreset(apiPresetSelect.val
 
 saveAiButton.addEventListener("click", async () => {
   if (!accessToken) {
-    setStatus("请先输入邀请码。");
+    setStatus("请先输入邀请码 / Enter the invite code first.");
     return;
   }
   saveAiButton.disabled = true;
-  aiStatusText.textContent = "正在测试 AI 服务...";
+  aiStatusText.textContent = "正在测试 AI 服务 / Testing AI service...";
   try {
     const configuration = currentAiConfiguration();
     const result = await postJson("/api/ai/test", configuration);
     localStorage.setItem(AI_STORAGE_KEY, JSON.stringify(configuration));
     if (sessionId) await bindSavedAiConfiguration();
-    aiStatusText.textContent = `AI 可用：${result.ai.provider} / ${result.ai.model}`;
-    aiText.textContent = `AI：${result.ai.provider} / ${result.ai.model}`;
+    aiStatusText.textContent = `AI 可用 / Ready: ${result.ai.provider} / ${result.ai.model}`;
+    aiText.textContent = `AI: ${result.ai.provider} / ${result.ai.model}`;
   } catch (error) {
-    aiStatusText.textContent = `AI 测试失败：${error.message}`;
+    aiStatusText.textContent = `AI 测试失败 / Test failed: ${error.message}`;
   } finally {
     saveAiButton.disabled = false;
   }
@@ -299,28 +299,28 @@ clearAiButton.addEventListener("click", async () => {
   if (sessionId) {
     await requestJson(`/api/sessions/${sessionId}/ai`, { method: "DELETE" });
   }
-  aiStatusText.textContent = "AI 未配置";
-  aiText.textContent = "AI 未配置";
+  aiStatusText.textContent = "AI 未配置 / AI not configured";
+  aiText.textContent = "AI 未配置 / AI not configured";
 });
 
 loginButton.addEventListener("click", async () => {
   const email = emailInput.value.trim();
   const password = passwordInput.value;
   if (!accessToken) {
-    setStatus("请先输入邀请码。");
+    setStatus("请先输入邀请码 / Enter the invite code first.");
     return;
   }
   if (!email || !password) {
-    setStatus("请填写 Worldpanel 账号和密码。");
+    setStatus("请填写 Worldpanel 账号和密码 / Enter your Worldpanel email and password.");
     return;
   }
 
   loginButton.disabled = true;
-  startProgress("Worldpanel login", [
-    { status: "running", message: "Submitting credentials" },
-    { status: "running", message: "Reading Report Set list" },
+  startProgress("Worldpanel login / Worldpanel 登录", [
+    { status: "running", message: "Submitting credentials / 提交登录信息" },
+    { status: "running", message: "Reading Report Set list / 读取 Report Set 列表" },
   ]);
-  setStatus("正在登录 Worldpanel...");
+  setStatus("正在登录 Worldpanel / Logging in to Worldpanel...");
   try {
     const result = await postJson("/api/login", { email, password, access_token: accessToken });
     sessionId = result.session_id;
@@ -328,16 +328,16 @@ loginButton.addEventListener("click", async () => {
     reportSetSelect.value = result.current;
     enterButton.disabled = false;
     unlock(reportPanel);
-    finishProgress("done", `Loaded ${result.report_sets.length} Report Sets`);
-    setStatus(`登录成功，读取到 ${result.report_sets.length} 个 Report Set`);
-    addMessage("assistant", "请选择 Report Set，然后进入 Ready-to-Use Reports。");
+    finishProgress("done", `Loaded ${result.report_sets.length} Report Sets / 已读取 ${result.report_sets.length} 个 Report Set`);
+    setStatus(`登录成功，读取到 ${result.report_sets.length} 个 Report Set / Login succeeded.`);
+    addMessage("assistant", "请选择 Report Set，然后进入 Ready-to-Use Reports。\nChoose a Report Set, then enter Ready-to-Use Reports.");
     bindSavedAiConfiguration().catch((error) => {
-      aiStatusText.textContent = `AI 绑定失败：${error.message}`;
+      aiStatusText.textContent = `AI 绑定失败 / Binding failed: ${error.message}`;
     });
   } catch (error) {
     finishProgress("error", error.message);
     setStatus(error.message);
-    addMessage("assistant", `登录失败：${error.message}`);
+    addMessage("assistant", `登录失败 / Login failed: ${error.message}`);
   } finally {
     loginButton.disabled = false;
   }
@@ -346,24 +346,24 @@ loginButton.addEventListener("click", async () => {
 enterButton.addEventListener("click", async () => {
   if (!sessionId) return;
   enterButton.disabled = true;
-  startProgress("Ready-to-Use reports", [
-    { status: "running", message: "Opening selected Report Set" },
-    { status: "running", message: "Reading report catalog" },
+  startProgress("Ready-to-Use reports / 报表目录", [
+    { status: "running", message: "Opening selected Report Set / 进入所选 Report Set" },
+    { status: "running", message: "Reading report catalog / 读取报表目录" },
   ]);
-  setStatus("正在进入 Report 并读取 Ready-to-Use Reports...");
+  setStatus("正在进入 Report 并读取 Ready-to-Use Reports / Opening reports...");
   try {
     const result = await postJson("/api/ready-to-use", {
       session_id: sessionId,
       report_set: reportSetSelect.value,
     });
     renderReadyToUse(result);
-    finishProgress("done", `Loaded ${result.reports.length} reports`);
+    finishProgress("done", `Loaded ${result.reports.length} reports / 已读取 ${result.reports.length} 个报表`);
     setStatus(`已进入 ${result.report_set}，当前分类：${result.current_category}`);
-    addMessage("assistant", "请选择 Ready-to-Use 分类和 Data Explorer 报表，然后点击准备所选报表。");
+    addMessage("assistant", "请选择 Ready-to-Use 分类和 Data Explorer 报表，然后点击准备所选报表。\nChoose a category and Data Explorer report, then prepare the report.");
   } catch (error) {
     finishProgress("error", error.message);
     setStatus(error.message);
-    addMessage("assistant", `进入 Report 失败：${error.message}`);
+    addMessage("assistant", `进入 Report 失败 / Failed to enter report: ${error.message}`);
   } finally {
     enterButton.disabled = false;
   }
@@ -372,7 +372,7 @@ enterButton.addEventListener("click", async () => {
 loadCategoryButton.addEventListener("click", async () => {
   if (!sessionId) return;
   loadCategoryButton.disabled = true;
-  setStatus("正在应用 Ready-to-Use 分类...");
+  setStatus("正在应用 Ready-to-Use 分类 / Applying category...");
   try {
     const result = await postJson("/api/ready-to-use", {
       session_id: sessionId,
@@ -383,7 +383,7 @@ loadCategoryButton.addEventListener("click", async () => {
     setStatus(`分类已切换到：${result.current_category}`);
   } catch (error) {
     setStatus(error.message);
-    addMessage("assistant", `分类筛选失败：${error.message}`);
+    addMessage("assistant", `分类筛选失败 / Category filter failed: ${error.message}`);
   } finally {
     loadCategoryButton.disabled = false;
   }
@@ -392,7 +392,7 @@ loadCategoryButton.addEventListener("click", async () => {
 discoverButton.addEventListener("click", async () => {
   if (!sessionId) return;
   discoverButton.disabled = true;
-  setStatus("正在全量读取 Pivot 维度、+ 成员与下拉框...");
+  setStatus("正在全量读取 Pivot 维度、+ 成员与下拉框 / Discovering Pivot members and dropdowns...");
   try {
     const result = await postJson("/api/pivot/discover", {
       session_id: sessionId,
@@ -400,31 +400,31 @@ discoverButton.addEventListener("click", async () => {
     });
     const memberBlocks = (result.members || []).map((dm) => {
       const sample = dm.members.slice(0, 12).map((m) => m.path.join(" > "));
-      const more = dm.count > sample.length ? ` …(共 ${dm.count} 个)` : "";
-      return `▸ ${dm.dimension}（${dm.axis}，+ 内 ${dm.count} 个成员）\n   ${sample.join("\n   ")}${more}`;
+      const more = dm.count > sample.length ? ` ... 共 ${dm.count} 个 / ${dm.count} total` : "";
+      return `- ${dm.dimension} (${dm.axis}, ${dm.count} 成员 / members)\n   ${sample.join("\n   ")}${more}`;
     });
     const dropdownBlocks = (result.dropdowns || []).map((dd) => {
-      const opts = dd.options.slice(0, 15).join("、");
-      const more = dd.options.length > 15 ? ` …(共 ${dd.options.length} 项)` : "";
-      return `▸ ${dd.dimension || dd.role}（下拉框，当前：${dd.selected}）\n   ${opts}${more}`;
+      const opts = dd.options.slice(0, 15).join(" / ");
+      const more = dd.options.length > 15 ? ` ... 共 ${dd.options.length} 项 / options` : "";
+      return `- ${dd.dimension || dd.role} (下拉框 / dropdown, 当前 / current: ${dd.selected})\n   ${opts}${more}`;
     });
     addMessage(
       "assistant",
       [
-        `Pivot 维度（${(result.dimensions || []).length} 个）：` +
-          (result.dimensions || []).map((d) => `${d.label}[${d.axis}]`).join("、"),
+        `Pivot 维度 / Dimensions (${(result.dimensions || []).length}): ` +
+          (result.dimensions || []).map((d) => `${d.label}[${d.axis}]`).join(" / "),
         "",
-        "—— + 号内成员（Row/Column 维度，全量展开）——",
-        memberBlocks.join("\n") || "（无）",
+        "成员树 / Member tree from + buttons:",
+        memberBlocks.join("\n") || "（无 / none）",
         "",
-        "—— 下拉框（Filter 维度）——",
-        dropdownBlocks.join("\n") || "（无）",
+        "下拉框 / Filter dropdowns:",
+        dropdownBlocks.join("\n") || "（无 / none）",
       ].join("\n"),
     );
-    setStatus("Pivot 维度 / + 成员 / 下拉框已全部读取。");
+    setStatus("Pivot 维度、+ 成员和下拉框已读取 / Pivot discovery completed.");
   } catch (error) {
     setStatus(error.message);
-    addMessage("assistant", `读取 Pivot 维度失败：${error.message}`);
+    addMessage("assistant", `读取 Pivot 维度失败 / Pivot discovery failed: ${error.message}`);
   } finally {
     discoverButton.disabled = false;
   }
@@ -435,12 +435,12 @@ refreshButton.addEventListener("click", async () => {
   if (!sessionId || !report) return;
 
   refreshButton.disabled = true;
-  startProgress("Prepare Data Explorer", [
-    { status: "running", message: "Opening selected report" },
-    { status: "running", message: "Discovering Data Explorer controls" },
-    { status: "running", message: allKpisInput.checked ? "Reading KPI tables" : "Reading current KPI table" },
+  startProgress("Prepare Data Explorer / 准备 Data Explorer", [
+    { status: "running", message: "Opening selected report / 打开所选报表" },
+    { status: "running", message: "Discovering Data Explorer controls / 识别 Data Explorer 控件" },
+    { status: "running", message: allKpisInput.checked ? "Reading KPI tables / 读取 KPI 表" : "Reading current KPI table / 读取当前 KPI 表" },
   ]);
-  setStatus("正在准备 Data Explorer 上下文...");
+  setStatus("正在准备 Data Explorer 上下文 / Preparing Data Explorer...");
   try {
     const result = await postJson("/api/refresh", {
       session_id: sessionId,
@@ -449,22 +449,22 @@ refreshButton.addEventListener("click", async () => {
       report_name: report.title,
       all_kpis: allKpisInput.checked,
     });
-    const metricText = result.metrics?.length ? `${result.metrics.length} 个 KPI` : "当前 KPI";
+    const metricText = result.metrics?.length ? `${result.metrics.length} 个 KPI / KPIs` : "当前 KPI / current KPI";
     setStatus(`报表已准备：${result.products.length} 个产品，${result.dates.length} 个日期，${metricText}`);
     checkButton.disabled = false;
     discoverButton.disabled = false;
     finishProgress("done", `Prepared ${result.products.length} products and ${result.dates.length} dates`);
     downloadCsvButton.disabled = false;
-    const dimensions = result.context?.dimensions ? Object.keys(result.context.dimensions).join("、") : "待识别";
+    const dimensions = result.context?.dimensions ? Object.keys(result.context.dimensions).join(" / ") : "待识别 / pending";
     const segmentCount = result.context?.segments?.length || 0;
     addMessage(
       "assistant",
-      `报表已准备：${result.report.report_set} / ${result.report.report_name}\n可操作维度：${dimensions}\nPivot segment：${segmentCount} 个`,
+      `报表已准备 / Report ready:\n${result.report.report_set} / ${result.report.report_name}\n可操作维度 / Dimensions: ${dimensions}\nPivot segment: ${segmentCount} 个 / segments`,
     );
   } catch (error) {
     finishProgress("error", error.message);
     setStatus(error.message);
-    addMessage("assistant", `准备报表失败：${error.message}`);
+    addMessage("assistant", `准备报表失败 / Prepare report failed: ${error.message}`);
   } finally {
     refreshButton.disabled = false;
   }
@@ -482,7 +482,7 @@ checkButton.addEventListener("click", async () => {
     addMessage("assistant", text);
     rememberAnswer(text);
   } catch (error) {
-    addMessage("assistant", `检查失败：${error.message}`);
+    addMessage("assistant", `检查失败 / Check failed: ${error.message}`);
   } finally {
     checkButton.disabled = false;
   }
@@ -491,7 +491,7 @@ checkButton.addEventListener("click", async () => {
 copyAnswerButton.addEventListener("click", async () => {
   if (!latestAnswerText) return;
   await navigator.clipboard.writeText(latestAnswerText);
-  setStatus("答案已复制。");
+  setStatus("答案已复制 / Answer copied.");
 });
 
 downloadCsvButton.addEventListener("click", () => {
@@ -516,12 +516,12 @@ askForm.addEventListener("submit", async (event) => {
 async function submitClarification(dimensionKey, value, questionOverride = null) {
   const question = questionOverride || pendingClarification?.question || pendingQuestion;
   if (!question) {
-    addMessage("assistant", "请选择后重新输入完整问题。");
+    addMessage("assistant", "请选择后重新输入完整问题。 / Please choose an option, then enter the full question again.");
     return;
   }
   pendingQuestion = question;
   addMessage("user", value);
-  setStatus("正在应用你补充的筛选条件...");
+  setStatus("正在应用你补充的筛选条件 / Applying your clarification...");
   await submitAsk({
     question,
     clarification: {
@@ -534,7 +534,7 @@ async function submitClarification(dimensionKey, value, questionOverride = null)
 async function submitAsk(payload) {
   try {
     if (!sessionId) {
-      addMessage("assistant", "请先登录并准备一个 Data Explorer 报表。");
+      addMessage("assistant", "请先登录并准备一个 Data Explorer 报表。 / Log in and prepare a Data Explorer report first.");
       return;
     }
     if (!payload.clarification) {
@@ -556,8 +556,8 @@ async function submitAsk(payload) {
     }
     pendingQuestion = null;
     pendingClarification = null;
-    const cacheText = result.cache_hit ? "\n（来自缓存）" : "";
-    const filterText = result.filters ? `\n\n筛选口径：${formatFilters(result.filters)}` : "";
+    const cacheText = result.cache_hit ? "\n（来自缓存 / from cache）" : "";
+    const filterText = result.filters ? `\n\n筛选口径 / Filters: ${formatFilters(result.filters)}` : "";
     const text = `${result.answer}${cacheText}${filterText}`;
     addMessage("assistant", text);
     rememberAnswer(text);
@@ -569,8 +569,8 @@ async function submitAsk(payload) {
 }
 
 async function submitPivotAsk(question, clarification = null) {
-  startProgress("Natural language query", [
-    { status: "running", message: clarification ? "Applying your clarification" : "Planning Pivot Screen operations" },
+  startProgress("Natural language query / 自然语言查询", [
+    { status: "running", message: clarification ? "Applying your clarification / 应用补充选择" : "Planning Pivot Screen operations / 规划 Pivot 操作" },
   ]);
   const planned = await postJson("/api/pivot/plan", {
     session_id: sessionId,
@@ -578,14 +578,14 @@ async function submitPivotAsk(question, clarification = null) {
     clarification,
   });
   if (planned.needs_clarification) {
-    finishProgress("waiting", "Waiting for your clarification");
+    finishProgress("waiting", "Waiting for your clarification / 等待补充选择");
     addPivotClarification(question, planned.clarification);
     return true;
   }
-  startProgress("Execute Pivot query", [
-    { status: "running", message: "Applying Pivot layout and member selections" },
-    { status: "running", message: "Reading KPI table from rendered report" },
-    { status: "running", message: "Parsing values and verifying receipt" },
+  startProgress("Execute Pivot query / 执行 Pivot 查询", [
+    { status: "running", message: "Applying Pivot layout and member selections / 应用 Pivot 布局和成员选择" },
+    { status: "running", message: "Reading KPI table from rendered report / 读取渲染后的 KPI 表" },
+    { status: "running", message: "Parsing values and verifying receipt / 解析数值并生成执行凭证" },
   ]);
   const executed = await postJson("/api/pivot/execute", {
     session_id: sessionId,
@@ -603,11 +603,11 @@ async function submitPivotAsk(question, clarification = null) {
   ].join("\n");
   const answerText =
     executed.answer ||
-    (executed.answer_error ? `Pivot 已应用，但读取答案失败：${executed.answer_error}` : "Pivot 已应用，表格已刷新。");
-  const text = `${answerText}\n\n执行凭证：\n${receiptText}`;
+    (executed.answer_error ? `Pivot 已应用，但读取答案失败 / Pivot applied but answer failed: ${executed.answer_error}` : "Pivot 已应用，表格已刷新。 / Pivot applied and table refreshed.");
+  const text = `${answerText}\n\n执行凭证 / Execution receipt:\n${receiptText}`;
   addMessage("assistant", text);
   rememberAnswer(text);
-  finishProgress("done", "Data pull completed");
+  finishProgress("done", "Data pull completed / 数据拉取完成");
   downloadCsvButton.disabled = false;
   pendingQuestion = null;
   pendingClarification = null;
@@ -649,7 +649,7 @@ function addPivotClarification(question, clarification) {
     button.addEventListener("click", async () => {
       for (const choice of actions.querySelectorAll("button")) choice.disabled = true;
       addMessage("user", option.label);
-      setStatus("正在按你选择的成员路径执行查询...");
+      setStatus("正在按你选择的成员路径执行查询 / Running with your selected member path...");
       try {
         await submitPivotAsk(question, {
           dimension: clarification.dimension_key,
@@ -666,13 +666,13 @@ function addPivotClarification(question, clarification) {
 
 function formatFilters(filters) {
   const pieces = [];
-  if (filters.products?.length) pieces.push(`产品 ${filters.products.join("/")}`);
-  if (filters.metrics?.length) pieces.push(`KPI ${filters.metrics.join("/")}`);
-  if (filters.year) pieces.push(filters.full_year ? `${filters.year} 全年` : `${filters.year}`);
+  if (filters.products?.length) pieces.push(`产品 / Product: ${filters.products.join("/")}`);
+  if (filters.metrics?.length) pieces.push(`KPI: ${filters.metrics.join("/")}`);
+  if (filters.year) pieces.push(filters.full_year ? `${filters.year} 全年 / full year` : `${filters.year}`);
   for (const [key, value] of Object.entries(filters.dimensions || {})) {
     pieces.push(`${key}=${value}`);
   }
-  return pieces.join("；") || "当前 Data Explorer 选择";
+  return pieces.join("; ") || "当前 Data Explorer 选择 / Current Data Explorer selection";
 }
 
 function renderReadyToUse(result) {
@@ -691,7 +691,19 @@ function renderReadyToUse(result) {
 async function loadHealth() {
   try {
     const health = await requestJson("/api/health");
-    aiText.textContent = health.ai.enabled ? `AI：${health.ai.provider} / ${health.ai.model}` : "AI 未配置";
+    const hasSavedAi = Boolean(localStorage.getItem(AI_STORAGE_KEY));
+    const defaults = health.ai_defaults || {};
+    if (!hasSavedAi && defaults.provider) {
+      apiPresetSelect.value = defaults.provider || "custom";
+      if (defaults.base_url) aiBaseUrlInput.value = defaults.base_url;
+      if (defaults.model) aiModelInput.value = defaults.model;
+    }
+    if (health.ai.enabled && !hasSavedAi) {
+      aiStatusText.textContent = `Default AI ready: ${health.ai.provider} / ${health.ai.model}`;
+    } else if (!health.ai.enabled && defaults.model && !hasSavedAi) {
+      aiStatusText.textContent = `Default model available: ${defaults.provider || "custom"} / ${defaults.model}`;
+    }
+    aiText.textContent = health.ai.enabled ? `AI: ${health.ai.provider} / ${health.ai.model}` : "AI 未配置 / AI not configured";
   } catch (error) {
     setStatus(error.message);
   }
@@ -700,11 +712,11 @@ async function loadHealth() {
 if (accessToken) {
   unlock(aiPanel);
   unlock(loginPanel);
-  setStatus("已恢复邀请码访问，请继续配置或登录。");
+  setStatus("已恢复邀请码访问，请继续配置或登录。 / Invite access restored. Continue setup or log in.");
 } else {
-  setStatus("等待邀请码");
+  setStatus("等待邀请码 / Waiting for invite code");
 }
 
 restoreAiConfiguration();
 loadHealth();
-addMessage("assistant", "请输入邀请码开始试用。");
+addMessage("assistant", "请输入邀请码开始试用。\nEnter the invite code to start.");

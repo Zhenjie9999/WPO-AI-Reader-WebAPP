@@ -4,6 +4,36 @@ from app.assistant import AISettings, AssistantClient, build_ai_status
 from app.config import get_settings
 
 
+@pytest.mark.asyncio
+async def test_assistant_client_uses_endpoint_id_for_ark_payload():
+    captured = {}
+
+    async def fake_post(url, *, headers, json, timeout):
+        captured["json"] = json
+
+        class Response:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {"choices": [{"message": {"content": "OK"}}]}
+
+        return Response()
+
+    settings = AISettings(
+        provider="doubao",
+        model="doubao-seed-2.0-lite",
+        api_key="secret",
+        base_url="https://ark.cn-beijing.volces.com/api/v3/chat/completions",
+        endpoint_id="ep-test",
+    )
+
+    result = await AssistantClient(settings, post=fake_post).chat("ping")
+
+    assert result == "OK"
+    assert captured["json"]["model"] == "ep-test"
+
+
 def test_build_ai_status_uses_one_shared_configuration():
     settings = AISettings(
         provider="custom",
@@ -48,6 +78,21 @@ def test_environment_api_key_does_not_enable_runtime_ai(monkeypatch):
     assert settings.ai.api_key is None
     assert settings.ai.base_url == ""
     assert settings.ai.model == ""
+
+
+def test_default_doubao_settings_can_enable_runtime_ai(monkeypatch):
+    monkeypatch.setenv("WPO_DEFAULT_AI_PROVIDER", "doubao")
+    monkeypatch.setenv("WPO_DEFAULT_AI_BASE_URL", "https://ark.cn-beijing.volces.com/api/v3/chat/completions")
+    monkeypatch.setenv("WPO_DEFAULT_AI_MODEL", "doubao-seed-2.0-lite")
+    monkeypatch.setenv("WPO_DEFAULT_AI_ENDPOINT_ID", "ep-test")
+    monkeypatch.setenv("WPO_DEFAULT_AI_API_KEY", "secret")
+
+    settings = get_settings()
+
+    assert settings.ai.enabled is True
+    assert settings.ai.provider == "doubao"
+    assert settings.ai.model == "doubao-seed-2.0-lite"
+    assert settings.ai.endpoint_id == "ep-test"
 
 
 @pytest.mark.asyncio

@@ -1,9 +1,10 @@
 services:
   - type: web
     name: wpo-ai-reader-webapp
-    env: docker
+    runtime: docker
     plan: free
     autoDeploy: true
+    healthCheckPath: /api/health
     envVars:
       - key: WPO_INVITE_CODE
         value: WPO2026ZHEN
@@ -11,3 +12,15 @@ services:
         value: "false"
       - key: WORLDPANEL_HEADLESS
         value: "true"
+      - key: WORLDPANEL_TIMEOUT_MS
+        value: "90000"
+      - key: WPO_DEFAULT_AI_PROVIDER
+        value: doubao
+      - key: WPO_DEFAULT_AI_BASE_URL
+        value: https://ark.cn-beijing.volces.com/api/v3/chat/completions
+      - key: WPO_DEFAULT_AI_MODEL
+        value: doubao-seed-2.0-lite
+      - key: WPO_DEFAULT_AI_ENDPOINT_ID
+        value: ep-20260611143619-l7n26
+      - key: WPO_DEFAULT_AI_API_KEY
+        sync: false

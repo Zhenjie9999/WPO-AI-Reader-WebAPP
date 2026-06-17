@@ -11,11 +11,15 @@ def test_public_frontend_contains_invite_ai_and_export_controls():
     assert "WPO AI Reader" in html
     assert "inviteCodeInput" in html
     assert "apiPresetSelect" in html
-    assert "Doubao" in html
+    assert "豆包 / Doubao" in html
     assert "copyAnswerButton" in html
     assert "downloadCsvButton" in html
     assert "progressBoard" in html
     assert "progressList" in html
+    assert "邀请码 / Invite Code" in html
+    assert "AI 配置 / AI Setup" in html
+    assert "Worldpanel 登录 / Login" in html
+    assert "报表范围 / Report Scope" in html
     assert "envLoginButton" not in html
 
 
@@ -46,7 +50,7 @@ def test_frontend_submits_typed_clarification_instead_of_starting_new_question()
 def test_frontend_does_not_silently_ignore_clarification_when_question_state_is_missing():
     script = APP_JS.read_text(encoding="utf-8")
 
-    assert "请选择后重新输入完整问题。" in script
+    assert "请选择后重新输入完整问题" in script
     assert "if (!pendingQuestion) return;" not in script
 
 
@@ -63,5 +67,17 @@ def test_frontend_polls_session_progress_for_long_running_data_pull():
     assert "/api/sessions/${sessionId}/progress" in script
     assert "startProgress(" in script
     assert "Data pull completed" in script
-    assert "执行凭证" in script
+    assert "执行凭证 / Execution receipt" in script
     assert "receipt.verified" in script
+
+
+def test_frontend_uses_readable_utf8_bilingual_copy():
+    script = APP_JS.read_text(encoding="utf-8")
+    html = INDEX_HTML.read_text(encoding="utf-8")
+
+    assert "自然语言数据读取 / Natural Language Data Access" in html
+    assert "发送 / Send" in html
+    assert "AI 可用 / Ready" in script
+    assert "数据拉取完成" in script
+    assert "�" not in html
+    assert "�" not in script
