@@ -618,7 +618,16 @@ async def pivot_execute(request: PivotExecuteRequest) -> dict[str, object]:
 
     if request.question:
         answer_error: str | None = None
-        if converted:
+        # Percentage / growth views (Yr-on-Yr % etc.) must be formatted as
+        # percentages, which the legacy KeyMeasures answerer cannot do, so use
+        # the orientation-aware pivot answerer for those.
+        is_percentage_view = bool(plan.calculation and "%" in plan.calculation)
+        member_leaves = [
+            selection.member_path[-1]
+            for selection in plan.member_selections
+            if selection.checked and selection.member_path
+        ]
+        if converted and not is_percentage_view:
             try:
                 table, _report = _get_session_cache(session)
                 answer = answer_question(request.question, table)
@@ -628,11 +637,6 @@ async def pivot_execute(request: PivotExecuteRequest) -> dict[str, object]:
                 answer_error = str(exc)
         if "answer" not in response:
             try:
-                member_leaves = [
-                    selection.member_path[-1]
-                    for selection in plan.member_selections
-                    if selection.checked and selection.member_path
-                ]
                 response["answer"] = answer_from_pivot_tables(
                     result.tables, member_leaves, result.receipt.period
                 )

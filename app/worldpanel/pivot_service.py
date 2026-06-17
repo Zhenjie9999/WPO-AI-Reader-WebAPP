@@ -204,6 +204,15 @@ _STOP_TOKEN_RE = re.compile(
 
 
 def _question_may_require_members(question: str) -> bool:
+    normalized = _normalize(question)
+    # Short Chinese product names (榴莲, 苹果, 西瓜...) are valid 2-char members,
+    # so a known alias anywhere in the question signals member intent.
+    if any(
+        _normalize(alias) in normalized
+        for aliases in _MEMBER_ALIASES.values()
+        for alias in aliases
+    ):
+        return True
     stripped = _STOP_TOKEN_RE.sub(" ", question)
     stripped = re.sub(r"[^A-Za-z0-9一-鿿]+", "", stripped)
     return len(stripped) >= 3
@@ -219,6 +228,43 @@ def _candidate_tokens(question: str) -> list[str]:
     return list(dict.fromkeys(token.strip() for token in tokens if token.strip()))
 
 
+# Chinese (and common alternate) names for English member labels in the CN
+# Zespri report. The Pivot member tree is labelled in English, so a Chinese
+# question like "榴莲销额" would otherwise never match. Keys are normalized
+# English labels; values are alternate terms to look for in the question.
+_MEMBER_ALIASES: dict[str, tuple[str, ...]] = {
+    "durian": ("榴莲",),
+    "apple": ("苹果",),
+    "banana": ("香蕉", "蕉"),
+    "cherry": ("车厘子", "樱桃"),
+    "grapes": ("葡萄", "提子"),
+    "blueberry": ("蓝莓",),
+    "strawberry": ("草莓",),
+    "watermelon": ("西瓜",),
+    "orangetangerine": ("橙", "柑橘", "橘子", "柑"),
+    "kiwifruit": ("奇异果", "猕猴桃"),
+    "goldkiwifruit": ("金果", "黄心奇异果", "黄心猕猴桃"),
+    "greenkiwifruit": ("绿果", "绿心奇异果", "绿心猕猴桃"),
+    "redkiwifruit": ("红果", "红心奇异果", "红心猕猴桃"),
+    "zespri": ("佳沛",),
+    "fruit": ("水果", "总水果"),
+}
+
+
+def _member_match_length(label: str, normalized_question: str) -> int:
+    """Return how strongly a member label appears in the question, by the length
+    of the matched term (English label or a known alias). 0 means no match."""
+    normalized_label = _normalize(label)
+    best = 0
+    if len(normalized_label) >= 3 and normalized_label in normalized_question:
+        best = len(normalized_label)
+    for alias in _MEMBER_ALIASES.get(normalized_label, ()):  # noqa: SIM118
+        normalized_alias = _normalize(alias)
+        if normalized_alias and normalized_alias in normalized_question:
+            best = max(best, len(normalized_alias) + 2)  # prefer explicit alias hits
+    return best
+
+
 async def _discover_members_from_question(
     question: str,
     report: str,
@@ -228,15 +274,23 @@ async def _discover_members_from_question(
 ) -> list[dict[str, Any]] | PlanClarification:
     normalized_question = _normalize(question)
     tokens = _candidate_tokens(question)
-    outstanding = set(_normalize(token) for token in tokens)
+    # Alias terms (e.g. 榴莲) are not Latin tokens, so seed searches with the
+    # English member labels they map to as well.
+    alias_seeds = [
+        label
+        for label, aliases in _MEMBER_ALIASES.items()
+        if any(_normalize(alias) in normalized_question for alias in aliases)
+    ]
+    search_terms = tokens + alias_seeds
+    outstanding = set(_normalize(token) for token in tokens) | set(alias_seeds)
     selections: list[dict[str, Any]] = []
     for tag in dimensions:
-        if tokens and not outstanding:
+        if outstanding == set() and (tokens or alias_seeds):
             break
         try:
             nodes: list[Any] = []
             seen: set[tuple[str, ...]] = set()
-            for token in tokens or [""]:
+            for token in search_terms or [""]:
                 for node in await schema.search(report, tag, token):
                     if node.path not in seen:
                         seen.add(node.path)
@@ -244,15 +298,12 @@ async def _discover_members_from_question(
             await driver.cancel_member_selection()
         except WorldpanelError:
             continue
-        matches = [
-            node
-            for node in nodes
-            if len(_normalize(node.label)) >= 3 and _normalize(node.label) in normalized_question
-        ]
+        scored = [(node, _member_match_length(node.label, normalized_question)) for node in nodes]
+        matches = [node for node, score in scored if score > 0]
         if not matches:
             continue
-        longest = max(len(_normalize(node.label)) for node in matches)
-        matches = [node for node in matches if len(_normalize(node.label)) == longest]
+        longest = max(_member_match_length(node.label, normalized_question) for node in matches)
+        matches = [node for node in matches if _member_match_length(node.label, normalized_question) == longest]
         unique_paths = tuple(dict.fromkeys(node.path for node in matches))
         if len(unique_paths) != 1:
             return PlanClarification(
@@ -264,7 +315,13 @@ async def _discover_members_from_question(
             {"dimension": tag.label, "member_path": list(unique_paths[0]), "checked": True}
         )
         matched_label = _normalize(matches[0].label)
-        outstanding = {token for token in outstanding if token not in matched_label and matched_label not in token}
+        matched_terms = {matched_label, *(_normalize(a) for a in _MEMBER_ALIASES.get(matched_label, ()))}
+        outstanding = {
+            token
+            for token in outstanding
+            if token != matched_label
+            and not any(token in term or term in token for term in matched_terms if term)
+        }
     if not selections:
         return PlanClarification(
             dimension="member",

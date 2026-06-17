@@ -11,6 +11,7 @@ from app.worldpanel.pivot_result import (
     table_from_grid,
 )
 from app.worldpanel.planner import _detect_calculation, _detect_filters, _detect_period
+from app.worldpanel.pivot_service import _member_match_length, _question_may_require_members
 
 
 # Real option signatures captured from the live report dropdowns.
@@ -94,6 +95,25 @@ def test_answer_formats_percent_for_a_yoy_table_at_the_requested_period():
     answer = answer_from_pivot_tables({"Spend (RMB 000) - Yr on Yr % Change": table}, [], "15-May-26")
     assert "+3.4%" in answer
     assert "Green kiwifruit +7.9%" in answer
+
+
+def test_chinese_product_names_map_to_english_members():
+    # 榴莲 (2 chars) must be recognized as member intent and match "Durian".
+    assert _question_may_require_members("榴莲 2026 May 销额") is True
+    assert _member_match_length("Durian", "榴莲2026may销额") > 0
+    assert _member_match_length("Gold kiwifruit", "金果销额") > 0
+    # An unrelated label does not match the durian question.
+    assert _member_match_length("Apple", "榴莲销额") == 0
+
+
+def test_english_member_still_matches_without_alias():
+    assert _question_may_require_members("Durian spend 2026 May") is True
+    assert _member_match_length("Durian", "durianspend2026may") > 0
+
+
+def test_pure_calculation_question_needs_no_member():
+    # "2026 May spend growth rate vs last year" has no product -> no member intent.
+    assert _question_may_require_members("2026 May spend growth rate vs last year") is False
 
 
 def test_answer_uses_absolute_format_for_value_metric():
