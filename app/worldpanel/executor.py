@@ -11,7 +11,12 @@ from app.worldpanel.pivot_models import (
     QueryPlan,
     normalize,
 )
-from app.worldpanel.pivot_result import PivotResultError, PivotResultTable, parse_pivot_text, resolve_period
+from app.worldpanel.pivot_result import (
+    PivotResultError,
+    PivotResultTable,
+    resolve_period,
+    table_from_grid,
+)
 from app.worldpanel.schema import SchemaService
 
 
@@ -49,8 +54,8 @@ class QueryExecutor:
             if not tag:
                 raise WorldpanelError(f"Dimension is unavailable: {dimension}")
             await self.driver.clear_member_selection(tag)
+            candidates = await self.schema.all_members(plan.report, tag)
             for selection in selections:
-                candidates = await self.schema.search(plan.report, tag, selection.member_path[-1])
                 matches = [node for node in candidates if node.path == selection.member_path]
                 if len(matches) != 1:
                     raise WorldpanelError(f"Could not uniquely resolve member path: {selection.member_path}")
@@ -59,20 +64,29 @@ class QueryExecutor:
 
         await self.driver.apply()
 
-        # Apply each requested KPI on the real report and parse the table the
-        # page actually rendered. The receipt carries what was applied, not
-        # what was planned.
+        # Apply page/filter dropdowns (calculation, channel, duration, ...) so
+        # the rendered table reflects, e.g., a Yr-on-Yr % growth view.
+        applied_calculation = None
+        if plan.calculation:
+            applied_calculation = await self._apply_dropdown("calculation", plan.calculation)
+        for selection in plan.filters:
+            await self._apply_dropdown(selection.role, selection.value)
+
+        # Apply each requested KPI on the real report and read the table the
+        # page actually rendered, straight from the data grid. The receipt
+        # carries what was applied, not what was planned.
         tables: dict[str, PivotResultTable] = {}
         applied_kpis: list[str] = []
         kpi_requests = plan.kpis or (await self.driver.read_report_kpi(),)
         for requested in kpi_requests:
             actual = await self.driver.select_report_kpi(requested) if requested else ""
-            text = await self.driver.read_report_text()
+            label = actual or await self.driver.read_report_kpi() or "KPI"
+            if applied_calculation:
+                label = f"{label} - {applied_calculation}"
             try:
-                table = parse_pivot_text(text, metric_override=actual or None)
+                table = await self._read_table(label)
             except PivotResultError as exc:
                 raise WorldpanelError(f"Applied pivot table could not be parsed: {exc}") from exc
-            label = actual or table.metric
             tables[label] = table
             applied_kpis.append(label)
         table_refreshed = bool(tables)
@@ -101,6 +115,26 @@ class QueryExecutor:
             actions=tuple(self.driver.actions),
         )
         return ExecutionResult(receipt=receipt, tables=tables)
+
+    async def _apply_dropdown(self, role: str, value: str) -> str:
+        dropdowns = await self.driver.read_dropdowns()
+        target = next(
+            (d for d in dropdowns if normalize(d.role) == normalize(role)),
+            None,
+        )
+        if target is None:
+            target = next(
+                (d for d in dropdowns if normalize(d.dimension) == normalize(role)),
+                None,
+            )
+        if target is None:
+            raise WorldpanelError(f"No report dropdown for '{role}'")
+        return await self.driver.select_dropdown(target.index, value)
+
+    async def _read_table(self, metric: str) -> PivotResultTable:
+        grid = await self.driver.read_report_grid()
+        rows = [(label, values) for label, values in grid["rows"]]
+        return table_from_grid(grid["columns"], rows, metric=metric)
 
 
 def _layout_from_plan(plan: QueryPlan) -> PivotLayout:

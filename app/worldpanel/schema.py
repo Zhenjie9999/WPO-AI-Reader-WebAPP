@@ -67,6 +67,20 @@ class SchemaService:
         self.schema_cache.set(key, value)
         return value
 
+    async def all_members(self, report: str, tag: DimensionTag) -> tuple[MemberNode, ...]:
+        """Fully enumerate every member of a dimension (every '+' expanded).
+
+        Reliable regardless of the selector search box, and cached per report +
+        dimension so repeated planning does not re-walk the tree.
+        """
+        key = (normalize(report), normalize(tag.label), "::all")
+        cached = self.schema_cache.get(key)
+        if cached is not None:
+            return cached
+        value = tuple(await self.driver.list_all_members(tag))
+        self.schema_cache.set(key, value)
+        return value
+
     async def search(self, report: str, tag: DimensionTag, text: str) -> tuple[MemberNode, ...]:
         key = (normalize(report), normalize(tag.label), normalize(text))
         cached = self.search_cache.get(key)

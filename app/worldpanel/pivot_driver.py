@@ -12,9 +12,11 @@ from app.worldpanel.pivot_models import (
     DimensionTag,
     MemberNode,
     PivotLayout,
+    ReportDropdown,
     normalize,
 )
 from app.worldpanel.pivot_parser import (
+    classify_dropdown_role,
     parse_dimension_tags,
     parse_member_tree,
     parse_pivot_layout,
@@ -39,6 +41,10 @@ class PivotDriver:
         self.active_dimension: str | None = None
         self.actions: list[str] = []
         self._selected_members: dict[str, set[tuple[str, ...]]] = {}
+        # Dimensions temporarily moved onto an axis to open their member dialog,
+        # keyed by normalized label -> (label, original_axis), so the layout can
+        # be restored after a read-only enumeration.
+        self._restore_axis: dict[str, tuple[str, str]] = {}
 
     async def attach(self) -> None:
         report = await self._wait_for_frame("DB_0001pp.aspx")
@@ -115,6 +121,17 @@ class PivotDriver:
 
     async def open_member_selector(self, tag: DimensionTag) -> None:
         pivot = self._require_pivot()
+        # Page/filter dimensions render their member icon hidden, so the member
+        # dialog can only be opened while the dimension sits on a Row/Column
+        # axis. Move it onto Column first, then restore the layout afterwards.
+        moved_from = None
+        if not await self._member_icon_visible(tag):
+            layout = await self.read_layout()
+            current_axis = self._axis_of(layout, tag.label)
+            if current_axis in (None, "filter", "available"):
+                await self.set_axis(tag, "column", 0)
+                moved_from = current_axis or "available"
+                tag = self._refreshed_tag(await self.list_dimension_tags(), tag.label) or tag
         item = pivot.locator(".rlbItem", has_text=tag.label).first
         image = item.locator("img.rlbImage, img").first
         if not await image.count() or not await image.is_visible():
@@ -124,7 +141,119 @@ class PivotDriver:
         await selector.locator(".RadTreeView").first.wait_for(state="visible", timeout=self.timeout_ms)
         self.frames = PivotFrames(report=self._require_frames().report, pivot=pivot, selector=selector)
         self.active_dimension = tag.label
+        if moved_from:
+            self._restore_axis[normalize(tag.label)] = (tag.label, moved_from)
         self.actions.append(f"open_members:{tag.label}")
+
+    async def _member_icon_visible(self, tag: DimensionTag) -> bool:
+        pivot = self._require_pivot()
+        item = pivot.locator(".rlbItem", has_text=tag.label).first
+        if not await item.count():
+            return False
+        image = item.locator("img.rlbImage, img").first
+        return bool(await image.count() and await image.is_visible())
+
+    @staticmethod
+    def _axis_of(layout: PivotLayout, label: str) -> str | None:
+        target = normalize(label)
+        for axis in ("row", "column", "filter", "available"):
+            if any(normalize(value) == target for value in layout.axis(axis)):  # type: ignore[arg-type]
+                return axis
+        return None
+
+    @staticmethod
+    def _refreshed_tag(tags: list[DimensionTag], label: str) -> DimensionTag | None:
+        target = normalize(label)
+        return next((tag for tag in tags if normalize(tag.label) == target), None)
+
+    async def list_all_members(self, tag: DimensionTag, max_passes: int = 60) -> list[MemberNode]:
+        """Open the member dialog and recursively expand every collapsed `+`
+        node, returning the complete member tree (all hidden members included)."""
+        await self._ensure_selector(tag)
+        selector = self._require_selector()
+        for _ in range(max_passes):
+            remaining = await selector.evaluate(
+                """
+                () => {
+                  const plus = [...document.querySelectorAll('.RadTreeView .rtPlus')]
+                    .filter(el => el.offsetParent !== null);
+                  plus.forEach(el => el.click());
+                  return plus.length;
+                }
+                """
+            )
+            if not remaining:
+                break
+            await asyncio.sleep(0.35)
+        return list(parse_member_tree(await self._html(selector)))
+
+    async def read_dropdowns(self) -> list[ReportDropdown]:
+        """Read every page/filter dropdown on the report with its options and
+        current selection. Dropdowns are matched to page-dimension labels by
+        document order when the counts line up."""
+        report = await self._wait_for_frame("DB_0001pp.aspx")
+        raw = await report.evaluate(
+            """
+            () => [...document.querySelectorAll('select')].map((select, index) => ({
+              index,
+              selected: (select.selectedOptions[0]?.textContent || '').trim().replace(/\\s+/g, ' '),
+              options: [...select.options].map(option => option.textContent.trim().replace(/\\s+/g, ' '))
+            }))
+            """
+        )
+        page_labels: list[str] = []
+        if self.frames and self.frames.pivot and not self.frames.pivot.is_detached():
+            layout = await self.read_layout()
+            page_labels = list(layout.filters)
+        dropdowns: list[ReportDropdown] = []
+        for entry in raw:
+            options = tuple(str(option) for option in entry["options"])
+            index = int(entry["index"])
+            dimension = page_labels[index] if index < len(page_labels) else ""
+            dropdowns.append(
+                ReportDropdown(
+                    index=index,
+                    role=classify_dropdown_role(options),
+                    dimension=dimension,
+                    selected=str(entry["selected"]),
+                    options=options,
+                )
+            )
+        return dropdowns
+
+    async def select_dropdown(self, index: int, value: str) -> str:
+        """Select a value (by label match) in the report dropdown at `index`,
+        wait for the report to refresh, and return the applied label."""
+        report = await self._wait_for_frame("DB_0001pp.aspx")
+        select = report.locator("select").nth(index)
+        await select.wait_for(state="attached", timeout=self.timeout_ms)
+        options = await select.evaluate(
+            """
+            element => [...element.options].map(option => ({
+              label: option.textContent.trim().replace(/\\s+/g, ' '),
+              value: option.value,
+              selected: option.selected
+            }))
+            """
+        )
+        match = _match_label_option(value, options)
+        if match is None:
+            available = ", ".join(str(option["label"]) for option in options)
+            raise WorldpanelError(f"Option '{value}' not available in dropdown {index}. Options: {available}")
+        if match.get("selected"):
+            return str(match["label"])
+        before_text = await report.locator("body").inner_text(timeout=self.timeout_ms)
+        await select.select_option(value=str(match["value"]))
+        deadline = asyncio.get_running_loop().time() + self.timeout_ms / 1000
+        while asyncio.get_running_loop().time() < deadline:
+            report = await self._wait_for_frame("DB_0001pp.aspx")
+            current_text = await report.locator("body").inner_text(timeout=self.timeout_ms)
+            if current_text != before_text:
+                break
+            await asyncio.sleep(0.2)
+        self.frames = PivotFrames(report=report)
+        self.actions.append(f"select_dropdown:{index}:{match['label']}")
+        return str(match["label"])
 
     async def list_members(self, tag: DimensionTag, path: tuple[str, ...] = ()) -> list[MemberNode]:
         await self._ensure_selector(tag)
@@ -382,6 +511,41 @@ class PivotDriver:
         await body.wait_for(state="visible", timeout=self.timeout_ms)
         return await body.inner_text(timeout=self.timeout_ms)
 
+    async def read_report_grid(self) -> dict[str, Any]:
+        """Read the rendered data grid straight from the DOM table.
+
+        Returns {"columns": [...], "rows": [[label, [cell|null, ...]], ...]}.
+        This is reliable across pivot orientations and KPI/calculation changes
+        because it never has to disentangle the table from the surrounding
+        dropdown option text. Empty cells (rendered as '.') become null.
+        """
+        report = await self._wait_for_frame("DB_0001pp.aspx")
+        grid = report.locator("table.infoset, table[id$='_DB_0001_01']").first
+        await grid.wait_for(state="attached", timeout=self.timeout_ms)
+        data = await grid.evaluate(
+            """
+            table => {
+              const rows = [...table.rows].map(row =>
+                [...row.cells].map(cell => {
+                  const text = (cell.innerText || '').trim().replace(/\\s+/g, ' ');
+                  return (text === '' || text === '.') ? null : text;
+                })
+              );
+              return rows;
+            }
+            """
+        )
+        if not data:
+            raise WorldpanelError("Report grid table was empty")
+        header = data[0]
+        columns = [str(cell) for cell in header[1:] if cell]
+        rows: list[list[Any]] = []
+        for raw in data[1:]:
+            if not raw or not raw[0]:
+                continue
+            rows.append([str(raw[0]), list(raw[1:])])
+        return {"columns": columns, "rows": rows}
+
     async def _report_id(self, report: Frame) -> str:
         marker = report.locator("#ReportIDTemp")
         if await marker.count():
@@ -464,17 +628,25 @@ _KPI_KEYWORDS = (
 
 
 def _match_kpi_option(requested: str, options: list[dict[str, Any]]) -> dict[str, Any] | None:
+    direct = _match_label_option(requested, options)
+    if direct is not None:
+        return direct
+    requested_normalized = normalize(requested)
+    for keyword, aliases in _KPI_KEYWORDS:
+        if any(normalize(alias) in requested_normalized for alias in aliases):
+            for option in options:
+                if keyword in normalize(str(option["label"])):
+                    return option
+    return None
+
+
+def _match_label_option(requested: str, options: list[dict[str, Any]]) -> dict[str, Any] | None:
     requested_normalized = normalize(requested)
     for option in options:
         if normalize(str(option["label"])) == requested_normalized:
             return option
     for option in options:
         label_normalized = normalize(str(option["label"]))
-        if requested_normalized in label_normalized or label_normalized in requested_normalized:
+        if requested_normalized and (requested_normalized in label_normalized or label_normalized in requested_normalized):
             return option
-    for keyword, aliases in _KPI_KEYWORDS:
-        if any(normalize(alias) in requested_normalized for alias in aliases):
-            for option in options:
-                if keyword in normalize(str(option["label"])):
-                    return option
     return None

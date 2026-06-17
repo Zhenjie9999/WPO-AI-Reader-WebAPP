@@ -23,6 +23,14 @@ class MemberSelection:
 
 
 @dataclass(frozen=True)
+class FilterSelection:
+    """A page/filter dropdown choice, e.g. Outlet=Hypermarket or Duration=4 w/e."""
+
+    role: str
+    value: str
+
+
+@dataclass(frozen=True)
 class QueryPlan:
     report_set: str
     report: str
@@ -31,6 +39,10 @@ class QueryPlan:
     kpis: tuple[str, ...] = ("Spend (RMB 000)",)
     expected_period: str | None = None
     output_shape: OutputShape = "single_value"
+    # Performance/calculation dropdown, e.g. "Yr on Yr % Change" for growth rate.
+    calculation: str | None = None
+    # Other page/filter dropdown choices (channel, duration, geography, ...).
+    filters: tuple[FilterSelection, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -52,6 +64,43 @@ class MemberNode:
     expanded: bool
     checked: bool
     selected: bool
+
+
+@dataclass(frozen=True)
+class ReportDropdown:
+    """A page/filter dropdown rendered on the Data Explorer report itself.
+
+    These controls have no stable id/name in the DOM, so they are addressed by
+    their position (document order) and classified into a role from their
+    option signature. `dimension` is the matching Pivot page-dimension label
+    when one is known.
+    """
+
+    index: int
+    role: str
+    dimension: str
+    selected: str
+    options: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class DimensionMembers:
+    """Fully-enumerated members of one Pivot dimension (every `+` expanded)."""
+
+    dimension: str
+    axis: Axis
+    members: tuple[MemberNode, ...]
+    truncated: bool = False
+
+
+@dataclass(frozen=True)
+class PivotDiscovery:
+    """Everything the Pivot Screen exposes: dimension tags, fully expanded
+    member trees, and the report's page/filter dropdowns."""
+
+    dimensions: tuple[DimensionTag, ...]
+    members: tuple[DimensionMembers, ...]
+    dropdowns: tuple[ReportDropdown, ...]
 
 
 @dataclass(frozen=True)
@@ -126,6 +175,8 @@ def plan_cache_key(plan: QueryPlan) -> tuple[object, ...]:
         tuple(normalize(kpi) for kpi in plan.kpis),
         normalize(plan.expected_period or ""),
         plan.output_shape,
+        normalize(plan.calculation or ""),
+        tuple((normalize(item.role), normalize(item.value)) for item in plan.filters),
     )
 
 

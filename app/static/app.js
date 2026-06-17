@@ -22,6 +22,7 @@ const reportSelect = document.querySelector("#reportSelect");
 const allKpisInput = document.querySelector("#allKpisInput");
 const refreshButton = document.querySelector("#refreshButton");
 const checkButton = document.querySelector("#checkButton");
+const discoverButton = document.querySelector("#discoverButton");
 const copyAnswerButton = document.querySelector("#copyAnswerButton");
 const downloadCsvButton = document.querySelector("#downloadCsvButton");
 const statusText = document.querySelector("#statusText");
@@ -388,6 +389,47 @@ loadCategoryButton.addEventListener("click", async () => {
   }
 });
 
+discoverButton.addEventListener("click", async () => {
+  if (!sessionId) return;
+  discoverButton.disabled = true;
+  setStatus("正在全量读取 Pivot 维度、+ 成员与下拉框...");
+  try {
+    const result = await postJson("/api/pivot/discover", {
+      session_id: sessionId,
+      question: "discover",
+    });
+    const memberBlocks = (result.members || []).map((dm) => {
+      const sample = dm.members.slice(0, 12).map((m) => m.path.join(" > "));
+      const more = dm.count > sample.length ? ` …(共 ${dm.count} 个)` : "";
+      return `▸ ${dm.dimension}（${dm.axis}，+ 内 ${dm.count} 个成员）\n   ${sample.join("\n   ")}${more}`;
+    });
+    const dropdownBlocks = (result.dropdowns || []).map((dd) => {
+      const opts = dd.options.slice(0, 15).join("、");
+      const more = dd.options.length > 15 ? ` …(共 ${dd.options.length} 项)` : "";
+      return `▸ ${dd.dimension || dd.role}（下拉框，当前：${dd.selected}）\n   ${opts}${more}`;
+    });
+    addMessage(
+      "assistant",
+      [
+        `Pivot 维度（${(result.dimensions || []).length} 个）：` +
+          (result.dimensions || []).map((d) => `${d.label}[${d.axis}]`).join("、"),
+        "",
+        "—— + 号内成员（Row/Column 维度，全量展开）——",
+        memberBlocks.join("\n") || "（无）",
+        "",
+        "—— 下拉框（Filter 维度）——",
+        dropdownBlocks.join("\n") || "（无）",
+      ].join("\n"),
+    );
+    setStatus("Pivot 维度 / + 成员 / 下拉框已全部读取。");
+  } catch (error) {
+    setStatus(error.message);
+    addMessage("assistant", `读取 Pivot 维度失败：${error.message}`);
+  } finally {
+    discoverButton.disabled = false;
+  }
+});
+
 refreshButton.addEventListener("click", async () => {
   const report = selectedReport();
   if (!sessionId || !report) return;
@@ -410,6 +452,7 @@ refreshButton.addEventListener("click", async () => {
     const metricText = result.metrics?.length ? `${result.metrics.length} 个 KPI` : "当前 KPI";
     setStatus(`报表已准备：${result.products.length} 个产品，${result.dates.length} 个日期，${metricText}`);
     checkButton.disabled = false;
+    discoverButton.disabled = false;
     finishProgress("done", `Prepared ${result.products.length} products and ${result.dates.length} dates`);
     downloadCsvButton.disabled = false;
     const dimensions = result.context?.dimensions ? Object.keys(result.context.dimensions).join("、") : "待识别";
