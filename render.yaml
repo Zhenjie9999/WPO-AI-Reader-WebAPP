@@ -11,16 +11,16 @@ services:
         value: "false"
       - key: WORLDPANEL_HEADLESS
         value: "true"
-      # Server-side AI planner (LLM-first). Set these in the Render dashboard so
-      # the deployed app understands questions with the model by default; if
-      # unset, the app falls back to built-in rule-based recognition.
-      # WPO_AI_BASE_URL must be the full chat-completions endpoint, e.g.
-      # https://api.openai.com/v1/chat/completions
-      - key: WPO_AI_BASE_URL
-        sync: false
-      - key: WPO_AI_MODEL
-        sync: false
+      # Server-side AI planner (LLM-first). Defaults target Doubao (Volcano Ark),
+      # so only the API key must be set here (as a secret) for the model to be
+      # the default recognizer. Without it, the app falls back to rule-based
+      # recognition. Override base URL / model / provider only to use a
+      # different provider.
       - key: WPO_AI_API_KEY
         sync: false
-      - key: WPO_AI_PROVIDER
-        sync: false
+      # - key: WPO_AI_BASE_URL   # default: https://ark.cn-beijing.volces.com/api/v3/chat/completions
+      #   sync: false
+      # - key: WPO_AI_MODEL      # default: ep-20260611143619-l7n26 (Doubao endpoint)
+      #   sync: false
+      # - key: WPO_AI_PROVIDER   # default: doubao
+      #   sync: false
