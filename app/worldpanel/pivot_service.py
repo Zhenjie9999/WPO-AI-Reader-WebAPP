@@ -218,12 +218,21 @@ def _question_may_require_members(question: str) -> bool:
     return len(stripped) >= 3
 
 
+# Page/filter dropdown values (durations, calculations) are resolved by the
+# planner's _detect_* helpers, never as Pivot members. Keep them out of the
+# member-candidate token list so e.g. 'STD'/'YTD' are never searched as members.
+_RESERVED_FILTER_TOKENS = {
+    "std", "ytd", "mat", "52we", "12we", "4we",
+    "actual", "yoy", "yronyr",
+}
+
+
 def _candidate_tokens(question: str) -> list[str]:
     stripped = _STOP_TOKEN_RE.sub(" ", question)
     tokens = [
         token
         for token in re.findall(r"[A-Za-z][A-Za-z0-9 ]*[A-Za-z0-9]|[一-鿿]{2,}", stripped)
-        if len(_normalize(token)) >= 3
+        if len(_normalize(token)) >= 3 and _normalize(token) not in _RESERVED_FILTER_TOKENS
     ]
     return list(dict.fromkeys(token.strip() for token in tokens if token.strip()))
 
@@ -285,6 +294,11 @@ async def _discover_members_from_question(
     outstanding = set(_normalize(token) for token in tokens) | set(alias_seeds)
     selections: list[dict[str, Any]] = []
     for tag in dimensions:
+        # Only Row/Column dimensions have a selectable member tree. Page/filter
+        # dimensions (Measures, Performance, Outlet, Duration, ...) are driven
+        # by report dropdowns, so never search them for members here.
+        if tag.axis not in ("row", "column"):
+            continue
         if outstanding == set() and (tokens or alias_seeds):
             break
         try:
