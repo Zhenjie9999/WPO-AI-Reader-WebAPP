@@ -47,6 +47,30 @@ def selected_member_paths(html: str) -> tuple[tuple[str, ...], ...]:
     return tuple(node.path for node in parse_member_tree(html) if node.selected or node.checked)
 
 
+def classify_dropdown_role(options: tuple[str, ...]) -> str:
+    """Classify a report page/filter dropdown into a role from its options.
+
+    The Data Explorer report dropdowns carry no id/name, so the only reliable
+    signal is the set of option labels.
+    """
+    lowered = {option.casefold() for option in options}
+
+    def has(*needles: str) -> bool:
+        return any(needle in option for needle in needles for option in lowered)
+
+    if has("yr on yr % change", "period on period"):
+        return "calculation"
+    if has("52 w/e", "12 w/e", "4 w/e") or "ytd" in lowered:
+        return "duration"
+    if has("spend (rmb", "penetration %", "volume (000", "buyers (000)"):
+        return "kpi"
+    if has("hypermarket", "total outlets", "cvs", "supermarket"):
+        return "channel"
+    if has("national", "tier 1", "shanghai", "tier1"):
+        return "geography"
+    return "filter"
+
+
 class _PivotListParser(HTMLParser):
     def __init__(self) -> None:
         super().__init__()

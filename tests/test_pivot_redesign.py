@@ -15,7 +15,7 @@ from app.worldpanel.pivot_models import (
     plan_cache_key,
 )
 from app.worldpanel.pivot_cache import VerifiedResult, VerifiedResultCache
-from app.worldpanel.pivot_result import parse_pivot_text
+from app.worldpanel.pivot_result import parse_pivot_text, table_from_grid
 from app.worldpanel.executor import QueryExecutor
 from app.worldpanel.pivot_parser import parse_dimension_tags, parse_member_tree, parse_pivot_layout
 from app.worldpanel.planner import PlanClarification, compile_query_plan
@@ -171,28 +171,23 @@ async def test_session_serializes_queries_and_manager_discards_expired():
     assert manager.size == 0
 
 
-REPORT_TEXT = """
-Key Measures Data Table
-Spend (RMB 000)
-Gold
-Apple
-15-Jan-25
-1,234
-2,000
-15-Feb-25
-1,300
-2,100
-"""
+REPORT_GRID = {
+    "columns": ["Gold", "Apple"],
+    "rows": [
+        ["15-Jan-25", ["1,234", "2,000"]],
+        ["15-Feb-25", ["1,300", "2,100"]],
+    ],
+}
 
 
 class _HonestDriver:
     """Mock driver that simulates the real page: KPI must be applied and the
     applied state is read back from what the page reports, not from memory."""
 
-    def __init__(self, gold, product, report_text=REPORT_TEXT, page_selected=None):
+    def __init__(self, gold, product, report_grid=None, page_selected=None):
         self.gold = gold
         self.product = product
-        self.report_text = report_text
+        self.report_grid = report_grid if report_grid is not None else REPORT_GRID
         self.page_selected = page_selected if page_selected is not None else {"Product": (gold.path,)}
         self.actions = []
         self.applied_kpi = None
@@ -230,8 +225,11 @@ class _HonestDriver:
     async def read_report_kpi(self):
         return self.applied_kpi or ""
 
-    async def read_report_text(self):
-        return self.report_text
+    async def read_report_grid(self):
+        return self.report_grid
+
+    async def read_dropdowns(self):
+        return []
 
     async def read_applied_state(self, *, dimensions=(), kpis=(), period=None, table_refreshed=False):
         return AppliedPivotState(
@@ -478,7 +476,7 @@ def test_verified_result_cache_is_scoped_per_account_and_report_parameter():
     )
     cache = VerifiedResultCache()
     scope = "user@example.com|param-a"
-    table = parse_pivot_text(REPORT_TEXT)
+    table = table_from_grid(REPORT_GRID["columns"], REPORT_GRID["rows"], metric="Spend")
     cache.set(plan, scope, VerifiedResult(receipt=verified, answer="42", tables={"Spend": table}))
 
     restored = cache.get(plan, scope)
@@ -542,8 +540,12 @@ async def test_executor_rejects_unparseable_refreshed_table_and_never_returns_re
         async def select_report_kpi(self, requested):
             return "Spend (RMB 000)"
 
-        async def read_report_text(self):
-            return "An error occurred while rendering the report."
+        async def read_report_kpi(self):
+            return "Spend (RMB 000)"
+
+        async def read_report_grid(self):
+            # A rendered error page: header row only, no data rows.
+            return {"columns": [], "rows": []}
 
     plan = QueryPlan(
         report_set="Set",

@@ -7,7 +7,14 @@ import re
 from typing import Any
 
 from app.assistant import AssistantClient
-from app.worldpanel.pivot_models import AxisPlacement, MemberNode, MemberSelection, QueryPlan, normalize
+from app.worldpanel.pivot_models import (
+    AxisPlacement,
+    FilterSelection,
+    MemberNode,
+    MemberSelection,
+    QueryPlan,
+    normalize,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -63,6 +70,11 @@ def compile_query_plan(
         for item in payload.get("axis_placements", [])
         if item.get("dimension") and item.get("axis") in {"row", "column", "filter", "available"}
     )
+    filters = tuple(
+        FilterSelection(role=str(item["role"]), value=str(item["value"]))
+        for item in payload.get("filters", [])
+        if isinstance(item, dict) and item.get("role") and item.get("value")
+    )
     return QueryPlan(
         report_set=report_set,
         report=report,
@@ -71,6 +83,8 @@ def compile_query_plan(
         kpis=tuple(str(value) for value in payload.get("kpis", ["Spend (RMB 000)"])),
         expected_period=str(payload["expected_period"]) if payload.get("expected_period") else None,
         output_shape=payload.get("output_shape", "single_value"),
+        calculation=str(payload["calculation"]) if payload.get("calculation") else None,
+        filters=filters,
     )
 
 
@@ -109,21 +123,89 @@ def _local_tentative_plan(question: str) -> dict[str, Any]:
     ):
         if any(alias.casefold() in question.casefold() for alias in aliases):
             kpis.append(name)
-    period = re.search(r"20\d{2}\s*[Pp]\s*\d{1,2}|20\d{2}\s*全年", question)
+    period = _detect_period(question)
+    calculation = _detect_calculation(question)
+    filters = _detect_filters(question)
     return {
         "axis_placements": axes,
         "member_selections": [],
         "kpis": kpis or ["Spend (RMB 000)"],
-        "expected_period": period.group(0) if period else None,
+        "expected_period": period,
+        "calculation": calculation,
+        "filters": filters,
         "output_shape": "trend" if "trend" in question.casefold() or "趋势" in question else "single_value",
         "planner_fallback": True,
     }
 
 
+_MONTHS = "jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec"
+
+
+def _detect_period(question: str) -> str | None:
+    lowered = question
+    match = re.search(r"20\d{2}\s*[Pp]\s*\d{1,2}", lowered)
+    if match:
+        return match.group(0)
+    match = re.search(r"20\d{2}\s*年\s*\d{1,2}\s*月", lowered)
+    if match:
+        return match.group(0)
+    match = re.search(rf"({_MONTHS})[a-z]*\.?\s*20\d{{2}}", lowered, flags=re.IGNORECASE)
+    if match:
+        return match.group(0)
+    match = re.search(rf"20\d{{2}}\s*({_MONTHS})[a-z]*", lowered, flags=re.IGNORECASE)
+    if match:
+        return match.group(0)
+    match = re.search(r"20\d{2}\s*全年", lowered)
+    if match:
+        return match.group(0)
+    return None
+
+
+def _detect_calculation(question: str) -> str | None:
+    lowered = question.casefold()
+    if any(token in lowered for token in ("yr on yr %", "yoy %", "同比增长", "增长率", "growth rate", "% change", "yoy growth")):
+        return "Yr on Yr % Change"
+    if any(token in lowered for token in ("yr on yr difference", "同比差异", "yoy difference")):
+        return "Yr on Yr Difference"
+    if any(token in lowered for token in ("period on period %", "环比增长", "环比")):
+        return "Period on Period % Change~"
+    if any(token in lowered for token in ("同比", "year on year", "yr on yr", "yoy", "vs last year", "vs ly", "去年同期")):
+        # Default same-period-last-year intent to the percentage growth view.
+        return "Yr on Yr % Change"
+    return None
+
+
+def _detect_filters(question: str) -> list[dict[str, str]]:
+    lowered = question.casefold()
+    filters: list[dict[str, str]] = []
+    for value, aliases in (
+        ("Hypermarket", ("hypermarket", "hyper", "大卖场")),
+        ("CVS", ("cvs", "便利店")),
+        ("Ecommerce", ("ecommerce", "电商", "线上")),
+        ("Supermarket", ("supermarket", "超市")),
+    ):
+        if any(alias in lowered for alias in aliases):
+            filters.append({"role": "channel", "value": value})
+            break
+    for value, aliases in (
+        ("52 w/e", ("52 w/e", "52we", "rolling year", "滚动年")),
+        ("4 w/e", ("4 w/e", "4we")),
+        ("YTD", ("ytd", "年初至今")),
+    ):
+        if any(alias in lowered for alias in aliases):
+            filters.append({"role": "duration", "value": value})
+            break
+    return filters
+
+
 def _planner_prompt(question: str) -> str:
     return (
         "Return JSON only. Extract tentative Worldpanel dimensions, member labels, KPI, period, "
-        "axis placement, and output shape. Do not invent member paths.\nQuestion: "
+        "axis placement, output shape, calculation, and filters. "
+        "Use \"calculation\": \"Yr on Yr % Change\" for growth-rate / 同比增长 / vs last year questions. "
+        "Use \"filters\": [{\"role\": \"channel|duration|geography\", \"value\": \"...\"}] for "
+        "channel, duration (52 w/e, 4 w/e, YTD), or region filters. "
+        "Do not invent member paths.\nQuestion: "
         + question
     )
 

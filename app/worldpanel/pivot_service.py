@@ -7,7 +7,12 @@ from app.assistant import AISettings, AssistantClient
 from app.config import Settings
 from app.worldpanel.client import Credentials, WorldpanelError
 from app.worldpanel.executor import ExecutionResult, QueryExecutor
-from app.worldpanel.pivot_models import DimensionTag, QueryPlan
+from app.worldpanel.pivot_models import (
+    DimensionMembers,
+    DimensionTag,
+    PivotDiscovery,
+    QueryPlan,
+)
 from app.worldpanel.planner import PlanClarification, StructuredPlanner, compile_query_plan
 from app.worldpanel.schema import SchemaService
 from app.worldpanel.session import DataExplorerSession, open_persistent_data_explorer
@@ -84,6 +89,44 @@ class PivotQueryService:
             discovered=discovered,
         )
 
+    async def discover(
+        self,
+        session: DataExplorerSession,
+        credentials: Credentials,
+    ) -> PivotDiscovery:
+        """Fully enumerate the Pivot Screen: every dimension tag, the complete
+        member tree behind each Row/Column dimension's '+', and every report
+        page/filter dropdown with its options."""
+        report = self._report(session)
+        driver = await open_persistent_data_explorer(
+            session,
+            settings=self.settings,
+            credentials=credentials,
+            report_set=report["report_set"],
+            report_parameter=report["report_parameter"],
+            report_name=report["report_name"],
+        )
+        await driver.open_pivot()
+        dimensions = await driver.list_dimension_tags()
+        members: list[DimensionMembers] = []
+        for tag in dimensions:
+            if tag.axis not in ("row", "column"):
+                continue
+            try:
+                nodes = await driver.list_all_members(tag)
+                await driver.cancel_member_selection()
+            except WorldpanelError:
+                continue
+            members.append(
+                DimensionMembers(dimension=tag.label, axis=tag.axis, members=tuple(nodes))
+            )
+        dropdowns = tuple(await driver.read_dropdowns())
+        return PivotDiscovery(
+            dimensions=tuple(dimensions),
+            members=tuple(members),
+            dropdowns=dropdowns,
+        )
+
     async def execute(
         self,
         session: DataExplorerSession,
@@ -141,9 +184,21 @@ def _tag_by_label(tags: tuple[DimensionTag, ...], label: str) -> DimensionTag | 
     return next((tag for tag in tags if tag.label.casefold() == requested), None)
 
 
+_STOP_WORDS_EN = (
+    "product|period|kpi|measures|measure|outlet|channel|performance|duration|geography|"
+    "optional1|optional2|row|column|filter|on|in|for|of|by|to|at|vs|versus|the|and|a|an|"
+    "show|give|me|please|what|is|are|how|much|many|value|values|sales|spend|volume|"
+    "penetration|buyers|frequency|trips|price|trend|table|comparison|growth|rate|change|"
+    "difference|actual|year|yr|yoy|last|ly|previous|prior|same|period|vs|"
+    "jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|"
+    "january|february|march|april|june|july|august|september|october|november|december"
+)
+_STOP_WORDS_ZH = (
+    "销额|销售额|金额|销量|销售量|渗透率|渗透|增长率|增长|同比|环比|去年|同期|本期|"
+    "月|年|的|和|与|对比|相比|是|多少|查询|查|看|读取|数据"
+)
 _STOP_TOKEN_RE = re.compile(
-    r"\b(Product|Period|KPI|Measures|Outlet|Channel|Row|Column|Filter|on|in|show|the|and|"
-    r"Spend|Volume|Penetration|trend|table|comparison|20\d{2}|P\d{1,2})\b",
+    rf"\b({_STOP_WORDS_EN})\b|({_STOP_WORDS_ZH})|20\d{{2}}|P\d{{1,2}}",
     flags=re.IGNORECASE,
 )
 

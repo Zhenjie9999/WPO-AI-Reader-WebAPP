@@ -9,6 +9,7 @@ from app.worldpanel.parser import KeyMeasuresTable
 
 DATE_RE = re.compile(r"\b\d{1,2}-[A-Za-z]{3}-\d{2}\b")
 _TITLE = "Key Measures Data Table"
+_MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"]
 
 
 class PivotResultError(ValueError):
@@ -54,6 +55,8 @@ class PivotResultTable:
             row = _match_label(row_term, self.row_labels)
             column = _match_label(column_term, self.column_labels)
             if row is not None and column is not None:
+                if column not in self.cells.get(row, {}):
+                    raise PivotResultError(f"Cell '{row}' x '{column}' is empty (no data)")
                 return self.cells[row][column], row, column
         raise PivotResultError(
             f"No cell found for '{first_term}' x '{second_term}'. "
@@ -68,13 +71,21 @@ class PivotResultTable:
         if axis == "row":
             dates, products = self.row_labels, self.column_labels
             rows = {
-                date: {product: round(self.cells[date][product]) for product in products}
+                date: {
+                    product: round(self.cells[date][product])
+                    for product in products
+                    if product in self.cells.get(date, {})
+                }
                 for date in dates
             }
         else:
             dates, products = self.column_labels, self.row_labels
             rows = {
-                date: {product: round(self.cells[product][date]) for product in products}
+                date: {
+                    product: round(self.cells[product][date])
+                    for product in products
+                    if date in self.cells.get(product, {})
+                }
                 for date in dates
             }
         return KeyMeasuresTable(
@@ -84,6 +95,48 @@ class PivotResultTable:
             dates=list(dates),
             rows=rows,
         )
+
+
+def table_from_grid(
+    columns: list[str],
+    rows: list[tuple[str, list[str | None]]],
+    *,
+    metric: str,
+    title: str = _TITLE,
+) -> PivotResultTable:
+    """Build a result table from a structured DOM grid extraction.
+
+    `rows` is a list of (row_label, raw_cell_values) where each raw value is the
+    cell text or None. Empty/"." cells are treated as missing (not zero), so a
+    null Year-on-Yr cell is never confused with a real 0.
+    """
+    column_labels = tuple(_clean(column) for column in columns)
+    row_labels: list[str] = []
+    cells: dict[str, dict[str, float]] = {}
+    for raw_label, raw_values in rows:
+        label = _clean(raw_label)
+        if not label:
+            continue
+        row_cells: dict[str, float] = {}
+        for column, raw_value in zip(column_labels, raw_values, strict=False):
+            if raw_value is None:
+                continue
+            cleaned = _clean(raw_value)
+            if not _looks_numeric(cleaned):
+                continue
+            row_cells[column] = _to_float(cleaned)
+        if label not in cells:
+            row_labels.append(label)
+        cells[label] = row_cells
+    if not cells:
+        raise PivotResultError("Report grid contained no data rows")
+    return PivotResultTable(
+        title=title,
+        metric=metric,
+        column_labels=column_labels,
+        row_labels=tuple(row_labels),
+        cells=cells,
+    )
 
 
 def parse_pivot_text(text: str, metric_override: str | None = None) -> PivotResultTable:
@@ -166,6 +219,21 @@ def resolve_period(expected: str, table: PivotResultTable) -> str:
             raise PivotResultError(f"No date in the table matches period '{expected}'")
         return candidates[-1]
 
+    english = re.search(
+        r"(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s*(20\d{2})"
+        r"|(20\d{2})\s*(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*",
+        expected,
+        flags=re.IGNORECASE,
+    )
+    if english:
+        month_name = (english.group(1) or english.group(4)).lower()
+        year = int(english.group(2) or english.group(3))
+        month = _MONTHS.index(month_name) + 1
+        candidates = [label for stamp, label in parsed if stamp.year == year and stamp.month == month]
+        if not candidates:
+            raise PivotResultError(f"No date in the table matches period '{expected}'")
+        return candidates[-1]
+
     match = re.search(r"20\d{2}", expected)
     if match:
         year = int(match.group(0))
@@ -189,16 +257,33 @@ def answer_from_pivot_tables(
     """
     if not tables:
         raise PivotResultError("No pivot tables were parsed")
+    is_percent = lambda metric: "%" in metric or "change" in metric.casefold()
     lines: list[str] = []
     for metric, table in tables.items():
         terms = [leaf for leaf in member_leaves if _label_in_table(leaf, table)]
         period = period_label or (table.dates[-1] if table.dates else None)
+        fmt = (lambda value: f"{value:+.1f}%") if is_percent(metric) else (lambda value: f"{value:,.0f}")
         if terms and period:
             value, row, column = table.value(terms[0], period)
-            lines.append(f"{metric}：{value:,.0f}（{row} × {column}）")
+            lines.append(f"{metric}：{fmt(value)}（{row} × {column}）")
         elif terms and len(terms) >= 2:
             value, row, column = table.value(terms[0], terms[1])
-            lines.append(f"{metric}：{value:,.0f}（{row} × {column}）")
+            lines.append(f"{metric}：{fmt(value)}（{row} × {column}）")
+        elif period and table.date_axis in ("row", "column"):
+            # No specific member requested: report every column at this period.
+            row = _match_label(period, table.row_labels)
+            if row is not None:
+                cells = table.cells.get(row, {})
+                parts = [f"{column} {fmt(cells[column])}" for column in table.column_labels if column in cells]
+                lines.append(f"{metric}（{row}）：" + "；".join(parts) if parts else f"{metric}（{row}）：无数据")
+            else:
+                column = _match_label(period, table.column_labels)
+                parts = [
+                    f"{label} {fmt(table.cells[label][column])}"
+                    for label in table.row_labels
+                    if column and column in table.cells.get(label, {})
+                ]
+                lines.append(f"{metric}（{column}）：" + "；".join(parts) if parts else f"{metric}：无数据")
         else:
             preview = "、".join(table.row_labels[:8])
             lines.append(f"{metric}：表格已刷新（{len(table.row_labels)} 行：{preview}…）")

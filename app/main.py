@@ -29,7 +29,7 @@ from app.worldpanel.data_explorer import (
 )
 from app.worldpanel.multitable import MultiKpiTable
 from app.worldpanel.parser import KeyMeasuresTable, parse_key_measures_text
-from app.worldpanel.pivot_models import AxisPlacement, MemberSelection, QueryPlan
+from app.worldpanel.pivot_models import AxisPlacement, FilterSelection, MemberSelection, QueryPlan
 from app.worldpanel.pivot_cache import VerifiedResult, VerifiedResultCache
 from app.worldpanel.pivot_result import PivotResultError, answer_from_pivot_tables
 from app.worldpanel.pivot_service import PivotQueryService
@@ -511,6 +511,59 @@ async def pivot_plan(request: PivotPlanRequest) -> dict[str, object]:
     return {"ok": True, "needs_clarification": False, "plan": asdict(result)}
 
 
+@app.post("/api/pivot/discover")
+async def pivot_discover(request: PivotPlanRequest) -> dict[str, object]:
+    """Fully enumerate the Pivot Screen for the current report: every dimension,
+    the complete member tree behind each Row/Column '+', and all report
+    dropdowns with their options."""
+    session = _session(request.session_id)
+    credentials = session.get("credentials")
+    if not isinstance(credentials, Credentials):
+        raise HTTPException(status_code=400, detail="Session credentials are unavailable")
+    pivot_session = _pivot_sessions.get_or_create(request.session_id)
+    if not pivot_session.current_report:
+        raise HTTPException(status_code=400, detail="请先在左侧选择 Data Explorer 报表并点击“读取所选报表”。")
+    try:
+        discovery = await pivot_session.serialized(
+            lambda: PivotQueryService(get_settings()).discover(pivot_session, credentials)
+        )
+    except WorldpanelError as exc:
+        await _pivot_sessions.discard(request.session_id)
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except Exception as exc:
+        await _pivot_sessions.discard(request.session_id)
+        raise HTTPException(status_code=500, detail=f"Pivot discovery failed: {exc}") from exc
+    return {
+        "ok": True,
+        "dimensions": [
+            {"label": tag.label, "axis": tag.axis, "member_count": tag.member_count}
+            for tag in discovery.dimensions
+        ],
+        "members": [
+            {
+                "dimension": dm.dimension,
+                "axis": dm.axis,
+                "count": len(dm.members),
+                "members": [
+                    {"path": list(node.path), "level": node.level, "has_children": node.has_children}
+                    for node in dm.members
+                ],
+            }
+            for dm in discovery.members
+        ],
+        "dropdowns": [
+            {
+                "index": dd.index,
+                "role": dd.role,
+                "dimension": dd.dimension,
+                "selected": dd.selected,
+                "options": list(dd.options),
+            }
+            for dd in discovery.dropdowns
+        ],
+    }
+
+
 @app.post("/api/pivot/execute")
 async def pivot_execute(request: PivotExecuteRequest) -> dict[str, object]:
     session = _session(request.session_id)
@@ -925,6 +978,12 @@ def _query_plan_from_payload(payload: dict[str, object]) -> QueryPlan:
         kpis=tuple(str(value) for value in payload.get("kpis", ["Spend (RMB 000)"])),  # type: ignore[arg-type]
         expected_period=str(payload["expected_period"]) if payload.get("expected_period") else None,
         output_shape=str(payload.get("output_shape") or "single_value"),  # type: ignore[arg-type]
+        calculation=str(payload["calculation"]) if payload.get("calculation") else None,
+        filters=tuple(
+            FilterSelection(role=str(item["role"]), value=str(item["value"]))
+            for item in payload.get("filters", [])  # type: ignore[union-attr]
+            if isinstance(item, dict) and item.get("role") and item.get("value")
+        ),
     )
 
 
