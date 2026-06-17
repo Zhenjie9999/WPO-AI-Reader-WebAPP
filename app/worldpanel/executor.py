@@ -54,8 +54,8 @@ class QueryExecutor:
             if not tag:
                 raise WorldpanelError(f"Dimension is unavailable: {dimension}")
             await self.driver.clear_member_selection(tag)
+            candidates = await self.schema.all_members(plan.report, tag)
             for selection in selections:
-                candidates = await self.schema.search(plan.report, tag, selection.member_path[-1])
                 matches = [node for node in candidates if node.path == selection.member_path]
                 if len(matches) != 1:
                     raise WorldpanelError(f"Could not uniquely resolve member path: {selection.member_path}")

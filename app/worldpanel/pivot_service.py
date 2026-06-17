@@ -282,16 +282,6 @@ async def _discover_members_from_question(
     driver,
 ) -> list[dict[str, Any]] | PlanClarification:
     normalized_question = _normalize(question)
-    tokens = _candidate_tokens(question)
-    # Alias terms (e.g. 榴莲) are not Latin tokens, so seed searches with the
-    # English member labels they map to as well.
-    alias_seeds = [
-        label
-        for label, aliases in _MEMBER_ALIASES.items()
-        if any(_normalize(alias) in normalized_question for alias in aliases)
-    ]
-    search_terms = tokens + alias_seeds
-    outstanding = set(_normalize(token) for token in tokens) | set(alias_seeds)
     selections: list[dict[str, Any]] = []
     for tag in dimensions:
         # Only Row/Column dimensions have a selectable member tree. Page/filter
@@ -299,16 +289,11 @@ async def _discover_members_from_question(
         # by report dropdowns, so never search them for members here.
         if tag.axis not in ("row", "column"):
             continue
-        if outstanding == set() and (tokens or alias_seeds):
-            break
         try:
-            nodes: list[Any] = []
-            seen: set[tuple[str, ...]] = set()
-            for token in search_terms or [""]:
-                for node in await schema.search(report, tag, token):
-                    if node.path not in seen:
-                        seen.add(node.path)
-                        nodes.append(node)
+            # Match against the fully enumerated member tree rather than the
+            # selector search box, which is unreliable; this is deterministic
+            # for both English labels and Chinese aliases.
+            nodes = await schema.all_members(report, tag)
             await driver.cancel_member_selection()
         except WorldpanelError:
             continue
@@ -328,14 +313,6 @@ async def _discover_members_from_question(
         selections.append(
             {"dimension": tag.label, "member_path": list(unique_paths[0]), "checked": True}
         )
-        matched_label = _normalize(matches[0].label)
-        matched_terms = {matched_label, *(_normalize(a) for a in _MEMBER_ALIASES.get(matched_label, ()))}
-        outstanding = {
-            token
-            for token in outstanding
-            if token != matched_label
-            and not any(token in term or term in token for term in matched_terms if term)
-        }
     if not selections:
         return PlanClarification(
             dimension="member",

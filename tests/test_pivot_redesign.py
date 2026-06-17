@@ -251,6 +251,9 @@ async def test_executor_applies_kpi_resolves_period_and_returns_receipt_from_pag
         async def search(self, report, tag, text):
             return (gold,)
 
+        async def all_members(self, report, tag):
+            return (gold,)
+
     plan = QueryPlan(
         report_set="Set",
         report="Report",
@@ -284,6 +287,9 @@ async def test_executor_rejects_member_mismatch_reported_by_the_page():
         async def search(self, report, tag, text):
             return (gold,)
 
+        async def all_members(self, report, tag):
+            return (gold,)
+
     plan = QueryPlan(
         report_set="Set",
         report="Report",
@@ -302,6 +308,9 @@ async def test_executor_rejects_unverifiable_period():
 
     class Schema:
         async def search(self, report, tag, text):
+            return (gold,)
+
+        async def all_members(self, report, tag):
             return (gold,)
 
     plan = QueryPlan(
@@ -409,6 +418,9 @@ async def test_fallback_planner_maps_question_against_live_members_without_fixed
 
     class Schema:
         async def search(self, report, tag, text):
+            return nodes
+
+        async def all_members(self, report, tag):
             return nodes
 
     class Driver:
