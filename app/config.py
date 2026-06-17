@@ -47,10 +47,17 @@ def get_settings() -> Settings:
             if origin.strip()
         ),
         ai=AISettings(
-            provider="custom",
-            model="",
-            api_key=None,
-            base_url="",
-            timeout_seconds=60,
+            # Defaults target Doubao (Volcano Ark, OpenAI-compatible). Only the
+            # API key is secret and must come from the environment — never commit
+            # it (this repo is public). With WPO_AI_API_KEY set, the app is
+            # LLM-first by default; users can still override per session.
+            provider=os.getenv("WPO_AI_PROVIDER", "doubao"),
+            model=os.getenv("WPO_AI_MODEL", "ep-20260611143619-l7n26"),
+            api_key=os.getenv("WPO_AI_API_KEY") or None,
+            base_url=os.getenv(
+                "WPO_AI_BASE_URL",
+                "https://ark.cn-beijing.volces.com/api/v3/chat/completions",
+            ),
+            timeout_seconds=float(os.getenv("WPO_AI_TIMEOUT_SECONDS", "60")),
         ),
     )

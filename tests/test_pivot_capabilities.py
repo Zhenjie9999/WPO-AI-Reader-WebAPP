@@ -16,7 +16,11 @@ from app.worldpanel.planner import (
     _detect_filters,
     _detect_period,
 )
-from app.worldpanel.pivot_service import _member_match_length, _question_may_require_members
+from app.worldpanel.pivot_service import (
+    _build_plan,
+    _member_match_length,
+    _question_may_require_members,
+)
 
 
 # Real option signatures captured from the live report dropdowns.
@@ -131,6 +135,33 @@ def test_chinese_product_names_map_to_english_members():
     assert _member_match_length("Gold kiwifruit", "金果销额") > 0
     # An unrelated label does not match the durian question.
     assert _member_match_length("Apple", "榴莲销额") == 0
+
+
+def test_llm_product_term_resolves_member_even_without_alias_or_literal_mention():
+    # The question never literally contains the product; the LLM supplies the
+    # translated English term, which must still resolve the live member.
+    assert _member_match_length("Dragonfruit", "给我2026年5月的销额", ("Dragonfruit",)) > 0
+    assert _member_match_length("Cherry", "2026 May value", ("cherry",)) > 0
+    # An unrelated label is not matched by an unrelated term.
+    assert _member_match_length("Apple", "2026 May value", ("cherry",)) == 0
+
+
+def test_build_plan_assembles_query_from_intent_and_resolved_members():
+    tentative = {
+        "axis_placements": [],
+        "kpis": ["Spend (RMB 000)"],
+        "expected_period": "2026 May",
+        "calculation": "Yr on Yr % Change",
+        "filters": [{"role": "duration", "value": "YTD"}],
+        "output_shape": "single_value",
+    }
+    members = [{"dimension": "Product", "member_path": ["Fruit", "Cherry"], "checked": True}]
+    plan = _build_plan(tentative, members, report_set="Set", report="Data Explorer")
+    assert plan.member_selections[0].member_path == ("Fruit", "Cherry")
+    assert plan.calculation == "Yr on Yr % Change"
+    assert plan.filters[0].role == "duration" and plan.filters[0].value == "YTD"
+    assert plan.expected_period == "2026 May"
+    assert plan.kpis == ("Spend (RMB 000)",)
 
 
 def test_english_member_still_matches_without_alias():
