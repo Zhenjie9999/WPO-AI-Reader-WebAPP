@@ -10,7 +10,12 @@ from app.worldpanel.pivot_result import (
     resolve_period,
     table_from_grid,
 )
-from app.worldpanel.planner import _detect_calculation, _detect_filters, _detect_period
+from app.worldpanel.planner import (
+    _detect_calculation,
+    _detect_duration,
+    _detect_filters,
+    _detect_period,
+)
 from app.worldpanel.pivot_service import _member_match_length, _question_may_require_members
 
 
@@ -78,6 +83,28 @@ def test_planner_detects_growth_period_and_filters_from_natural_language():
     filters = _detect_filters(question)
     roles = {f["role"]: f["value"] for f in filters}
     assert roles == {"channel": "Hypermarket", "duration": "52 w/e"}
+
+
+def test_duration_std_and_ytd_are_distinct_and_never_conflated():
+    assert _detect_duration("Spend YTD") == "YTD"
+    assert _detect_duration("Spend STD") == "STD"
+    assert _detect_duration("销额 年初至今") == "YTD"
+    assert _detect_duration("销额 单期") == "STD"
+    assert _detect_duration("Spend 52 w/e") == "52 w/e"
+    assert _detect_duration("Spend 12 w/e") == "12 w/e"
+    assert _detect_duration("Spend 4 w/e") == "4 w/e"
+    # A plain question with no duration keyword resolves to nothing (default STD
+    # is applied by the report, not invented here).
+    assert _detect_duration("2026 May spend") is None
+    # 'std'/'ytd' must not match as substrings of unrelated words.
+    assert _detect_duration("understand the trend") is None
+
+
+def test_filters_carry_the_exact_duration_choice():
+    ytd = {f["role"]: f["value"] for f in _detect_filters("CVS YTD spend")}
+    assert ytd == {"channel": "CVS", "duration": "YTD"}
+    std = {f["role"]: f["value"] for f in _detect_filters("STD spend in Hypermarket")}
+    assert std == {"channel": "Hypermarket", "duration": "STD"}
 
 
 def test_planner_detects_chinese_growth_and_period():

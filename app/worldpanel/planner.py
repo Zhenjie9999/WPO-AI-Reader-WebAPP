@@ -187,15 +187,32 @@ def _detect_filters(question: str) -> list[dict[str, str]]:
         if any(alias in lowered for alias in aliases):
             filters.append({"role": "channel", "value": value})
             break
-    for value, aliases in (
-        ("52 w/e", ("52 w/e", "52we", "rolling year", "滚动年")),
-        ("4 w/e", ("4 w/e", "4we")),
-        ("YTD", ("ytd", "年初至今")),
-    ):
-        if any(alias in lowered for alias in aliases):
-            filters.append({"role": "duration", "value": value})
-            break
+    duration = _detect_duration(question)
+    if duration:
+        filters.append({"role": "duration", "value": duration})
     return filters
+
+
+# Duration options are mutually exclusive and easy to confuse (STD vs YTD are
+# different things). Match each precisely with word boundaries and never let one
+# alias bleed into another.
+_DURATION_PATTERNS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("YTD", (r"\bytd\b", "年初至今", "年累计", "今年以来", "年初至本期")),
+    ("52 w/e", (r"\b52\s*w/?e\b", r"\bmat\b", "rolling year", "滚动年", "52周")),
+    ("12 w/e", (r"\b12\s*w/?e\b", "12周", "近12周")),
+    ("4 w/e", (r"\b4\s*w/?e\b", "4周", "近4周", "最新一期")),
+    ("STD", (r"\bstd\b", "single period", "单期", "标准期", "当期")),
+)
+
+
+def _detect_duration(question: str) -> str | None:
+    lowered = question.casefold()
+    for value, patterns in _DURATION_PATTERNS:
+        for pattern in patterns:
+            is_regex = pattern.startswith(r"\b") or "\\s" in pattern
+            if (re.search(pattern, lowered) if is_regex else pattern in lowered):
+                return value
+    return None
 
 
 def _planner_prompt(question: str) -> str:
@@ -204,7 +221,9 @@ def _planner_prompt(question: str) -> str:
         "axis placement, output shape, calculation, and filters. "
         "Use \"calculation\": \"Yr on Yr % Change\" for growth-rate / 同比增长 / vs last year questions. "
         "Use \"filters\": [{\"role\": \"channel|duration|geography\", \"value\": \"...\"}] for "
-        "channel, duration (52 w/e, 4 w/e, YTD), or region filters. "
+        "channel, duration, or region filters. The duration value must be exactly one of "
+        "STD, 52 w/e, 12 w/e, 4 w/e, or YTD — these are distinct (STD is the standard/single "
+        "period, YTD is year-to-date); never substitute one for another. "
         "Do not invent member paths.\nQuestion: "
         + question
     )
