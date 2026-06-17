@@ -11,3 +11,16 @@ services:
         value: "false"
       - key: WORLDPANEL_HEADLESS
         value: "true"
+      # Server-side AI planner (LLM-first). Set these in the Render dashboard so
+      # the deployed app understands questions with the model by default; if
+      # unset, the app falls back to built-in rule-based recognition.
+      # WPO_AI_BASE_URL must be the full chat-completions endpoint, e.g.
+      # https://api.openai.com/v1/chat/completions
+      - key: WPO_AI_BASE_URL
+        sync: false
+      - key: WPO_AI_MODEL
+        sync: false
+      - key: WPO_AI_API_KEY
+        sync: false
+      - key: WPO_AI_PROVIDER
+        sync: false

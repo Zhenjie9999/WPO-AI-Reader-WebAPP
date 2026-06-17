@@ -8,12 +8,15 @@ from app.config import Settings
 from app.worldpanel.client import Credentials, WorldpanelError
 from app.worldpanel.executor import ExecutionResult, QueryExecutor
 from app.worldpanel.pivot_models import (
+    AxisPlacement,
     DimensionMembers,
     DimensionTag,
+    FilterSelection,
+    MemberSelection,
     PivotDiscovery,
     QueryPlan,
 )
-from app.worldpanel.planner import PlanClarification, StructuredPlanner, compile_query_plan
+from app.worldpanel.planner import PlanClarification, StructuredPlanner
 from app.worldpanel.schema import SchemaService
 from app.worldpanel.session import DataExplorerSession, open_persistent_data_explorer
 
@@ -46,47 +49,42 @@ class PivotQueryService:
         if clarification:
             _apply_clarification(tentative, clarification)
         dimensions = await schema.dimensions()
-        discovered: dict[str, tuple[Any, ...]] = {}
-        if (
-            not clarification
-            and tentative.get("planner_fallback")
-            and _question_may_require_members(question)
-        ):
-            fallback = await _discover_members_from_question(
+
+        # Product terms come from the LLM (translated/natural names) and from any
+        # member the user explicitly clarified. We always resolve them against
+        # the live member tree ourselves, so the model only needs to understand
+        # language — the exact hierarchy path is verified, never invented.
+        clarified_selections = [
+            dict(selection)
+            for selection in tentative.get("member_selections", [])
+            if selection.get("member_path")
+        ]
+        extra_terms = [str(term) for term in tentative.get("products", []) if str(term).strip()]
+        extra_terms += [
+            str(selection["member_path"][-1])
+            for selection in clarified_selections
+        ]
+
+        resolved_selections: list[dict[str, Any]] = []
+        if not clarification and (extra_terms or _question_may_require_members(question)):
+            resolved = await _discover_members_from_question(
                 question,
                 report["report_name"],
                 dimensions,
                 schema,
                 driver,
+                extra_terms=tuple(extra_terms),
             )
-            if isinstance(fallback, PlanClarification):
-                return fallback
-            tentative["member_selections"] = fallback
-        requested_by_dimension: dict[str, list[tuple[str, ...]]] = {}
-        for selection in tentative.get("member_selections", []):
-            dimension_name = str(selection.get("dimension") or "")
-            requested_by_dimension.setdefault(dimension_name, []).append(
-                tuple(str(part) for part in selection.get("member_path", []))
-            )
-        for dimension_name, requested_paths in requested_by_dimension.items():
-            tag = _tag_by_label(dimensions, dimension_name)
-            if not tag:
-                return PlanClarification(
-                    dimension=dimension_name,
-                    question=f"Dimension is unavailable: {dimension_name}",
-                    candidates=tuple((tag.label,) for tag in dimensions),
-                )
-            matches: dict[tuple[str, ...], Any] = {}
-            for requested in requested_paths:
-                for node in await schema.search(report["report_name"], tag, requested[-1] if requested else ""):
-                    matches[node.path] = node
-            discovered[dimension_name] = tuple(matches.values())
-            await driver.cancel_member_selection()
-        return compile_query_plan(
+            if isinstance(resolved, PlanClarification):
+                return resolved
+            resolved_selections = resolved
+
+        member_selections = clarified_selections or resolved_selections
+        return _build_plan(
             tentative,
+            member_selections,
             report_set=report["report_set"],
             report=report["report_name"],
-            discovered=discovered,
         )
 
     async def discover(
@@ -162,6 +160,52 @@ def _schema_for(session: DataExplorerSession, driver: Any) -> SchemaService:
     schema = SchemaService(driver)
     context["schema"] = schema
     return schema
+
+
+def _build_plan(
+    tentative: dict[str, Any],
+    member_selections: list[dict[str, Any]],
+    *,
+    report_set: str,
+    report: str,
+) -> QueryPlan:
+    """Assemble a QueryPlan from the planner intent plus already-resolved
+    (live, verified) member paths."""
+    axes = tuple(
+        AxisPlacement(
+            dimension=str(item["dimension"]),
+            axis=str(item["axis"]),  # type: ignore[arg-type]
+            position=int(item.get("position", 0)),
+        )
+        for item in tentative.get("axis_placements", [])
+        if isinstance(item, dict) and item.get("dimension") and item.get("axis") in {"row", "column", "filter", "available"}
+    )
+    members = tuple(
+        MemberSelection(
+            dimension=str(selection["dimension"]),
+            member_path=tuple(str(part) for part in selection["member_path"]),
+            checked=bool(selection.get("checked", True)),
+        )
+        for selection in member_selections
+        if selection.get("member_path")
+    )
+    filters = tuple(
+        FilterSelection(role=str(item["role"]), value=str(item["value"]))
+        for item in tentative.get("filters", [])
+        if isinstance(item, dict) and item.get("role") and item.get("value")
+    )
+    kpis = tuple(str(value) for value in tentative.get("kpis", []) if str(value).strip()) or ("Spend (RMB 000)",)
+    return QueryPlan(
+        report_set=report_set,
+        report=report,
+        axis_placements=axes,
+        member_selections=members,
+        kpis=kpis,
+        expected_period=str(tentative["expected_period"]) if tentative.get("expected_period") else None,
+        output_shape=tentative.get("output_shape", "single_value"),
+        calculation=str(tentative["calculation"]) if tentative.get("calculation") else None,
+        filters=filters,
+    )
 
 
 def _apply_clarification(tentative: dict[str, Any], clarification: dict[str, Any]) -> None:
@@ -260,17 +304,34 @@ _MEMBER_ALIASES: dict[str, tuple[str, ...]] = {
 }
 
 
-def _member_match_length(label: str, normalized_question: str) -> int:
-    """Return how strongly a member label appears in the question, by the length
-    of the matched term (English label or a known alias). 0 means no match."""
+def _member_match_length(
+    label: str,
+    normalized_question: str,
+    extra_terms: tuple[str, ...] = (),
+) -> int:
+    """Return how strongly a member label appears in the question or in an
+    LLM-provided product term, by the length of the matched term (English label
+    or a known alias). 0 means no match."""
     normalized_label = _normalize(label)
+    if not normalized_label:
+        return 0
+    aliases = tuple(_normalize(a) for a in _MEMBER_ALIASES.get(normalized_label, ()))
     best = 0
     if len(normalized_label) >= 3 and normalized_label in normalized_question:
         best = len(normalized_label)
-    for alias in _MEMBER_ALIASES.get(normalized_label, ()):  # noqa: SIM118
-        normalized_alias = _normalize(alias)
+    for normalized_alias in aliases:
         if normalized_alias and normalized_alias in normalized_question:
             best = max(best, len(normalized_alias) + 2)  # prefer explicit alias hits
+    # LLM-provided terms (already translated to the English product name) match
+    # the label directly, even if the raw label never appeared in the question.
+    for term in extra_terms:
+        normalized_term = _normalize(term)
+        if not normalized_term:
+            continue
+        if normalized_term == normalized_label or normalized_term in normalized_label or normalized_label in normalized_term:
+            best = max(best, len(normalized_term) + 1)
+        elif any(alias and (alias in normalized_term or normalized_term in alias) for alias in aliases):
+            best = max(best, len(normalized_term) + 2)
     return best
 
 
@@ -280,6 +341,7 @@ async def _discover_members_from_question(
     dimensions: tuple[DimensionTag, ...],
     schema: SchemaService,
     driver,
+    extra_terms: tuple[str, ...] = (),
 ) -> list[dict[str, Any]] | PlanClarification:
     normalized_question = _normalize(question)
     selections: list[dict[str, Any]] = []
@@ -297,12 +359,12 @@ async def _discover_members_from_question(
             await driver.cancel_member_selection()
         except WorldpanelError:
             continue
-        scored = [(node, _member_match_length(node.label, normalized_question)) for node in nodes]
+        scored = [(node, _member_match_length(node.label, normalized_question, extra_terms)) for node in nodes]
         matches = [node for node, score in scored if score > 0]
         if not matches:
             continue
-        longest = max(_member_match_length(node.label, normalized_question) for node in matches)
-        matches = [node for node in matches if _member_match_length(node.label, normalized_question) == longest]
+        longest = max(_member_match_length(node.label, normalized_question, extra_terms) for node in matches)
+        matches = [node for node in matches if _member_match_length(node.label, normalized_question, extra_terms) == longest]
         unique_paths = tuple(dict.fromkeys(node.path for node in matches))
         if len(unique_paths) != 1:
             return PlanClarification(

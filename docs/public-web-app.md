@@ -28,6 +28,24 @@ Required environment variables:
 - `WPO_ENABLE_ENV_LOGIN=false`
 - `WORLDPANEL_HEADLESS=true`
 
+Optional server-side AI planner (LLM-first). When set, the deployed app maps
+natural-language questions to the live schema with the model and only falls back
+to built-in rule-based recognition if the call fails. Set these as Render
+secrets (do not commit them):
+
+- `WPO_AI_BASE_URL` — full chat-completions endpoint, e.g. `https://api.openai.com/v1/chat/completions`
+- `WPO_AI_MODEL` — e.g. `gpt-4o-mini` or your model id
+- `WPO_AI_API_KEY` — your provider key
+- `WPO_AI_PROVIDER` — label only, e.g. `openai`
+
+Notes:
+- `WPO_AI_BASE_URL` must be the **chat-completions** URL (OpenAI-compatible
+  `{model, messages}` body, `Authorization: Bearer <key>`), not just the host. A
+  wrong path or key surfaces as an AI error and the app silently uses rules — so
+  verify via `/api/health` (`ai.enabled: true`) and the in-app "测试并保存" button.
+- Per-user AI configured in the browser overrides the server default for that
+  session, so users can bring their own key without any server key set.
+
 The service runs:
 
 ```bash

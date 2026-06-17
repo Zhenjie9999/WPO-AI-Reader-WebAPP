@@ -47,10 +47,10 @@ def get_settings() -> Settings:
             if origin.strip()
         ),
         ai=AISettings(
-            provider="custom",
-            model="",
-            api_key=None,
-            base_url="",
-            timeout_seconds=60,
+            provider=os.getenv("WPO_AI_PROVIDER", "custom"),
+            model=os.getenv("WPO_AI_MODEL", ""),
+            api_key=os.getenv("WPO_AI_API_KEY") or None,
+            base_url=os.getenv("WPO_AI_BASE_URL", ""),
+            timeout_seconds=float(os.getenv("WPO_AI_TIMEOUT_SECONDS", "60")),
         ),
     )

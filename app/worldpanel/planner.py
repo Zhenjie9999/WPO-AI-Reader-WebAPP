@@ -97,14 +97,19 @@ class StructuredPlanner:
             return _local_tentative_plan(question)
         try:
             response = await self.assistant.chat(_planner_prompt(question))
-            return _extract_json(response)
+            payload = _extract_json(response)
+            payload.setdefault("planner_mode", "ai")
+            return payload
         except Exception as exc:
             logger.warning(
                 "Configured AI planner failed (%s: %s); falling back to local rule-based planning",
                 type(exc).__name__,
                 exc,
             )
-            return _local_tentative_plan(question)
+            fallback = _local_tentative_plan(question)
+            fallback["planner_mode"] = "fallback"
+            fallback["ai_error"] = f"{type(exc).__name__}: {exc}"
+            return fallback
 
 
 def _local_tentative_plan(question: str) -> dict[str, Any]:
@@ -129,12 +134,14 @@ def _local_tentative_plan(question: str) -> dict[str, Any]:
     return {
         "axis_placements": axes,
         "member_selections": [],
+        "products": [],
         "kpis": kpis or ["Spend (RMB 000)"],
         "expected_period": period,
         "calculation": calculation,
         "filters": filters,
         "output_shape": "trend" if "trend" in question.casefold() or "趋势" in question else "single_value",
         "planner_fallback": True,
+        "planner_mode": "fallback",
     }
 
 
@@ -217,8 +224,15 @@ def _detect_duration(question: str) -> str | None:
 
 def _planner_prompt(question: str) -> str:
     return (
-        "Return JSON only. Extract tentative Worldpanel dimensions, member labels, KPI, period, "
-        "axis placement, output shape, calculation, and filters. "
+        "Return JSON only. Extract the user's Worldpanel data intent. "
+        "Schema: {\"products\": [string], \"kpis\": [string], \"expected_period\": string|null, "
+        "\"calculation\": string|null, \"filters\": [{\"role\": string, \"value\": string}], "
+        "\"axis_placements\": [{\"dimension\": string, \"axis\": string, \"position\": int}], "
+        "\"output_shape\": string}. "
+        "Put product/category/brand names the user mentions into \"products\" as plain natural-language "
+        "terms (translate Chinese to the English product name when you can, e.g. 榴莲->Durian, "
+        "车厘子->Cherry, 金果->Gold kiwifruit); do NOT guess exact hierarchy paths — the system resolves "
+        "them against the live member tree. "
         "Use \"calculation\": \"Yr on Yr % Change\" for growth-rate / 同比增长 / vs last year questions. "
         "Use \"filters\": [{\"role\": \"channel|duration|geography\", \"value\": \"...\"}] for "
         "channel, duration, or region filters. The duration value must be exactly one of "
