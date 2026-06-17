@@ -29,6 +29,10 @@ const aiText = document.querySelector("#aiText");
 const messages = document.querySelector("#messages");
 const askForm = document.querySelector("#askForm");
 const questionInput = document.querySelector("#questionInput");
+const progressBoard = document.querySelector("#progressBoard");
+const progressTitle = document.querySelector("#progressTitle");
+const progressElapsed = document.querySelector("#progressElapsed");
+const progressList = document.querySelector("#progressList");
 
 const ACCESS_STORAGE_KEY = "wpo-access-token";
 const AI_STORAGE_KEY = "wpo-ai-configuration";
@@ -56,9 +60,96 @@ let sessionId = null;
 let pendingQuestion = null;
 let pendingClarification = null;
 let latestAnswerText = "";
+let progressPollTimer = null;
+let progressClockTimer = null;
+let progressStartedAt = null;
 
 function setStatus(text) {
   statusText.textContent = text;
+}
+
+function startProgress(title, steps = []) {
+  progressStartedAt = Date.now();
+  progressBoard.classList.remove("idle", "complete", "error");
+  progressBoard.classList.add("active");
+  progressTitle.textContent = title;
+  renderProgressEvents(steps.length ? steps : [{ status: "running", message: title }]);
+  updateProgressClock();
+  if (progressClockTimer) clearInterval(progressClockTimer);
+  progressClockTimer = setInterval(updateProgressClock, 1000);
+  startProgressPolling();
+}
+
+function finishProgress(status = "done", message = "完成") {
+  renderProgressEvents([{ status, message }], true);
+  progressBoard.classList.remove("active", "idle");
+  progressBoard.classList.add(status === "error" ? "error" : "complete");
+  stopProgressPolling();
+}
+
+function renderProgressEvents(events, append = false) {
+  const existing = append
+    ? [...progressList.querySelectorAll("li")].map((item) => ({
+        status: item.dataset.status || "running",
+        message: item.querySelector(".progress-message")?.textContent || item.textContent,
+      }))
+    : [];
+  const merged = [...existing, ...events].slice(-8);
+  progressList.innerHTML = "";
+  for (const event of merged) {
+    const item = document.createElement("li");
+    item.dataset.status = event.status || "running";
+    const dot = document.createElement("span");
+    dot.className = "progress-dot";
+    const message = document.createElement("span");
+    message.className = "progress-message";
+    message.textContent = event.message || "Working...";
+    item.appendChild(dot);
+    item.appendChild(message);
+    progressList.appendChild(item);
+  }
+}
+
+function updateProgressClock() {
+  if (!progressStartedAt) {
+    progressElapsed.textContent = "00:00";
+    return;
+  }
+  const seconds = Math.max(0, Math.floor((Date.now() - progressStartedAt) / 1000));
+  const minutes = String(Math.floor(seconds / 60)).padStart(2, "0");
+  const rest = String(seconds % 60).padStart(2, "0");
+  progressElapsed.textContent = `${minutes}:${rest}`;
+}
+
+function startProgressPolling() {
+  if (!sessionId || progressPollTimer) return;
+  progressPollTimer = setInterval(loadProgress, 1200);
+  loadProgress().catch(() => {});
+}
+
+function stopProgressPolling() {
+  if (progressPollTimer) clearInterval(progressPollTimer);
+  progressPollTimer = null;
+  if (progressClockTimer) clearInterval(progressClockTimer);
+  progressClockTimer = null;
+}
+
+async function loadProgress() {
+  if (!sessionId) return;
+  const result = await requestJson(`/api/sessions/${sessionId}/progress`);
+  const events = result.events || [];
+  if (events.length) {
+    progressTitle.textContent = result.current || "Working...";
+    renderProgressEvents(events);
+    progressBoard.classList.remove("idle");
+    progressBoard.classList.toggle("active", result.active);
+  }
+  if (!result.active && events.length) {
+    const last = events[events.length - 1];
+    progressBoard.classList.remove("active");
+    progressBoard.classList.add(last.status === "error" ? "error" : "complete");
+    stopProgressPolling();
+  }
 }
 
 function unlock(panel) {
@@ -156,6 +247,7 @@ async function bindSavedAiConfiguration() {
 
 inviteButton.addEventListener("click", async () => {
   inviteButton.disabled = true;
+  startProgress("Invite access", [{ status: "running", message: "Checking invite code" }]);
   setStatus("正在验证邀请码...");
   try {
     const result = await postJson("/api/access", { invite_code: inviteCodeInput.value.trim() });
@@ -163,9 +255,11 @@ inviteButton.addEventListener("click", async () => {
     localStorage.setItem(ACCESS_STORAGE_KEY, accessToken);
     unlock(aiPanel);
     unlock(loginPanel);
+    finishProgress("done", "Invite accepted");
     setStatus("邀请码已通过，请配置 AI 并登录 Worldpanel");
     addMessage("assistant", "欢迎使用 WPO AI Reader。请先配置你的 AI API，然后登录 Worldpanel Online。");
   } catch (error) {
+    finishProgress("error", error.message);
     setStatus(error.message);
   } finally {
     inviteButton.disabled = false;
@@ -221,6 +315,10 @@ loginButton.addEventListener("click", async () => {
   }
 
   loginButton.disabled = true;
+  startProgress("Worldpanel login", [
+    { status: "running", message: "Submitting credentials" },
+    { status: "running", message: "Reading Report Set list" },
+  ]);
   setStatus("正在登录 Worldpanel...");
   try {
     const result = await postJson("/api/login", { email, password, access_token: accessToken });
@@ -229,12 +327,14 @@ loginButton.addEventListener("click", async () => {
     reportSetSelect.value = result.current;
     enterButton.disabled = false;
     unlock(reportPanel);
+    finishProgress("done", `Loaded ${result.report_sets.length} Report Sets`);
     setStatus(`登录成功，读取到 ${result.report_sets.length} 个 Report Set`);
     addMessage("assistant", "请选择 Report Set，然后进入 Ready-to-Use Reports。");
     bindSavedAiConfiguration().catch((error) => {
       aiStatusText.textContent = `AI 绑定失败：${error.message}`;
     });
   } catch (error) {
+    finishProgress("error", error.message);
     setStatus(error.message);
     addMessage("assistant", `登录失败：${error.message}`);
   } finally {
@@ -245,6 +345,10 @@ loginButton.addEventListener("click", async () => {
 enterButton.addEventListener("click", async () => {
   if (!sessionId) return;
   enterButton.disabled = true;
+  startProgress("Ready-to-Use reports", [
+    { status: "running", message: "Opening selected Report Set" },
+    { status: "running", message: "Reading report catalog" },
+  ]);
   setStatus("正在进入 Report 并读取 Ready-to-Use Reports...");
   try {
     const result = await postJson("/api/ready-to-use", {
@@ -252,9 +356,11 @@ enterButton.addEventListener("click", async () => {
       report_set: reportSetSelect.value,
     });
     renderReadyToUse(result);
+    finishProgress("done", `Loaded ${result.reports.length} reports`);
     setStatus(`已进入 ${result.report_set}，当前分类：${result.current_category}`);
     addMessage("assistant", "请选择 Ready-to-Use 分类和 Data Explorer 报表，然后点击准备所选报表。");
   } catch (error) {
+    finishProgress("error", error.message);
     setStatus(error.message);
     addMessage("assistant", `进入 Report 失败：${error.message}`);
   } finally {
@@ -287,6 +393,11 @@ refreshButton.addEventListener("click", async () => {
   if (!sessionId || !report) return;
 
   refreshButton.disabled = true;
+  startProgress("Prepare Data Explorer", [
+    { status: "running", message: "Opening selected report" },
+    { status: "running", message: "Discovering Data Explorer controls" },
+    { status: "running", message: allKpisInput.checked ? "Reading KPI tables" : "Reading current KPI table" },
+  ]);
   setStatus("正在准备 Data Explorer 上下文...");
   try {
     const result = await postJson("/api/refresh", {
@@ -299,6 +410,7 @@ refreshButton.addEventListener("click", async () => {
     const metricText = result.metrics?.length ? `${result.metrics.length} 个 KPI` : "当前 KPI";
     setStatus(`报表已准备：${result.products.length} 个产品，${result.dates.length} 个日期，${metricText}`);
     checkButton.disabled = false;
+    finishProgress("done", `Prepared ${result.products.length} products and ${result.dates.length} dates`);
     downloadCsvButton.disabled = false;
     const dimensions = result.context?.dimensions ? Object.keys(result.context.dimensions).join("、") : "待识别";
     const segmentCount = result.context?.segments?.length || 0;
@@ -307,6 +419,7 @@ refreshButton.addEventListener("click", async () => {
       `报表已准备：${result.report.report_set} / ${result.report.report_name}\n可操作维度：${dimensions}\nPivot segment：${segmentCount} 个`,
     );
   } catch (error) {
+    finishProgress("error", error.message);
     setStatus(error.message);
     addMessage("assistant", `准备报表失败：${error.message}`);
   } finally {
@@ -407,20 +520,30 @@ async function submitAsk(payload) {
     rememberAnswer(text);
     downloadCsvButton.disabled = false;
   } catch (error) {
+    finishProgress("error", error.message);
     addMessage("assistant", error.message);
   }
 }
 
 async function submitPivotAsk(question, clarification = null) {
+  startProgress("Natural language query", [
+    { status: "running", message: clarification ? "Applying your clarification" : "Planning Pivot Screen operations" },
+  ]);
   const planned = await postJson("/api/pivot/plan", {
     session_id: sessionId,
     question,
     clarification,
   });
   if (planned.needs_clarification) {
+    finishProgress("waiting", "Waiting for your clarification");
     addPivotClarification(question, planned.clarification);
     return true;
   }
+  startProgress("Execute Pivot query", [
+    { status: "running", message: "Applying Pivot layout and member selections" },
+    { status: "running", message: "Reading KPI table from rendered report" },
+    { status: "running", message: "Parsing values and verifying receipt" },
+  ]);
   const executed = await postJson("/api/pivot/execute", {
     session_id: sessionId,
     question,
@@ -441,6 +564,7 @@ async function submitPivotAsk(question, clarification = null) {
   const text = `${answerText}\n\n执行凭证：\n${receiptText}`;
   addMessage("assistant", text);
   rememberAnswer(text);
+  finishProgress("done", "Data pull completed");
   downloadCsvButton.disabled = false;
   pendingQuestion = null;
   pendingClarification = null;

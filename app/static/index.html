@@ -106,6 +106,19 @@
           <div id="aiText">AI 未配置</div>
         </div>
 
+        <section id="progressBoard" class="progress-board idle" aria-live="polite">
+          <div class="progress-head">
+            <div>
+              <p class="eyebrow">Data pull progress</p>
+              <h3 id="progressTitle">等待任务</h3>
+            </div>
+            <div id="progressElapsed" class="progress-elapsed">00:00</div>
+          </div>
+          <ol id="progressList" class="progress-list">
+            <li class="progress-empty">还没有正在执行的数据拉取任务。</li>
+          </ol>
+        </section>
+
         <div id="messages" class="messages"></div>
 
         <form id="askForm" class="composer">

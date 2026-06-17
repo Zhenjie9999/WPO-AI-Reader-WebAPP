@@ -14,6 +14,8 @@ def test_public_frontend_contains_invite_ai_and_export_controls():
     assert "Doubao" in html
     assert "copyAnswerButton" in html
     assert "downloadCsvButton" in html
+    assert "progressBoard" in html
+    assert "progressList" in html
     assert "envLoginButton" not in html
 
 
@@ -53,5 +55,13 @@ def test_frontend_uses_live_pivot_plan_execute_and_displays_verified_receipt():
 
     assert 'postJson("/api/pivot/plan"' in script
     assert 'postJson("/api/pivot/execute"' in script
+
+
+def test_frontend_polls_session_progress_for_long_running_data_pull():
+    script = APP_JS.read_text(encoding="utf-8")
+
+    assert "/api/sessions/${sessionId}/progress" in script
+    assert "startProgress(" in script
+    assert "Data pull completed" in script
     assert "执行凭证" in script
     assert "receipt.verified" in script

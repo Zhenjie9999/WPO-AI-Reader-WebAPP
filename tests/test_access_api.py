@@ -1,6 +1,6 @@
 from fastapi.testclient import TestClient
 
-from app.main import _sessions, app
+from app.main import _progress, _reset_progress, _sessions, app
 from app.worldpanel.client import Credentials
 from app.worldpanel.parser import parse_key_measures_text
 
@@ -59,3 +59,22 @@ Coke TM
     assert response.headers["content-type"].startswith("text/csv")
     assert "product,date,metric,value" in response.text
     assert "Coke TM,26-Dec-25,Spend (RMB 000),4000" in response.text
+
+
+def test_session_progress_api_returns_current_operation_events():
+    _sessions["progress-session"] = {"credentials": Credentials("one@example.com", "password")}
+    _reset_progress(_sessions["progress-session"], "Prepare Data Explorer")
+    _progress(_sessions["progress-session"], "running", "Reading current KPI table")
+    _progress(_sessions["progress-session"], "done", "Prepared table", active=False)
+
+    response = TestClient(app).get("/api/sessions/progress-session/progress")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["active"] is False
+    assert payload["current"] == "Prepared table"
+    assert [event["message"] for event in payload["events"]] == [
+        "Prepare Data Explorer",
+        "Reading current KPI table",
+        "Prepared table",
+    ]

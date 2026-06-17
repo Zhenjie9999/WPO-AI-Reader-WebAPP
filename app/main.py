@@ -3,6 +3,7 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 import csv
 from dataclasses import asdict
+from datetime import datetime, timezone
 from io import StringIO
 from typing import AsyncIterator
 from uuid import uuid4
@@ -64,6 +65,7 @@ _access_tokens: set[str] = set()
 _query_cache = DataExplorerCache("runtime/query-cache.json")
 _pivot_sessions = DataExplorerSessionManager()
 _pivot_result_cache = VerifiedResultCache()
+_MAX_PROGRESS_EVENTS = 30
 
 
 class LoginRequest(BaseModel):
@@ -202,6 +204,17 @@ async def clear_ai_configuration(session_id: str) -> dict[str, object]:
     return {"ok": True, "ai": build_ai_status(get_settings().ai)}
 
 
+@app.get("/api/sessions/{session_id}/progress")
+async def session_progress(session_id: str) -> dict[str, object]:
+    session = _session(session_id)
+    return {
+        "ok": True,
+        "active": bool(session.get("progress_active")),
+        "current": session.get("progress_current"),
+        "events": list(session.get("progress_events", [])),
+    }
+
+
 @app.post("/api/login")
 async def login(request: LoginRequest) -> dict[str, object]:
     _require_access_token(request.access_token)
@@ -230,6 +243,8 @@ async def _login_with_credentials(credentials: Credentials) -> dict[str, object]
 
     session_id = str(uuid4())
     _sessions[session_id] = {"credentials": credentials}
+    _reset_progress(_sessions[session_id], "Worldpanel login")
+    _progress(_sessions[session_id], "done", "Worldpanel login completed")
     _pivot_sessions.get_or_create(session_id)
     return {
         "ok": True,
@@ -243,6 +258,8 @@ async def _login_with_credentials(credentials: Credentials) -> dict[str, object]
 async def ready_to_use(request: ReadyToUseRequest) -> dict[str, object]:
     settings = get_settings()
     session = _session(request.session_id)
+    _reset_progress(session, "Ready-to-Use reports")
+    _progress(session, "running", f"Opening report set: {request.report_set}")
     credentials = session["credentials"]
     client = WorldpanelClient(settings)
     try:
@@ -252,12 +269,20 @@ async def ready_to_use(request: ReadyToUseRequest) -> dict[str, object]:
             category=request.category,
         )
     except WorldpanelError as exc:
+        _progress(session, "error", str(exc), active=False)
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     except Exception as exc:
+        _progress(session, "error", f"Reading Ready-to-Use reports failed: {exc}", active=False)
         raise HTTPException(status_code=500, detail=f"Reading Ready-to-Use reports failed: {exc}") from exc
 
     session["report_set"] = request.report_set
     session["ready_category"] = request.category or catalog.current_category
+    _progress(
+        session,
+        "done",
+        f"Loaded {len(catalog.reports)} Ready-to-Use reports",
+        active=False,
+    )
     return {
         "ok": True,
         "report_set": catalog.report_set,
@@ -278,6 +303,8 @@ async def refresh(request: RefreshRequest | None = None) -> dict[str, object]:
 
     if request and request.session_id:
         session = _session(request.session_id)
+        _reset_progress(session, "Prepare Data Explorer")
+        _progress(session, "running", "Selecting report and opening Data Explorer")
         credentials = session["credentials"]  # type: ignore[assignment]
         report_set = request.report_set or str(session.get("report_set") or settings.report_set)
         if request.report_parameter:
@@ -306,10 +333,13 @@ async def refresh(request: RefreshRequest | None = None) -> dict[str, object]:
     try:
         if request and request.session_id and request.report_parameter:
             session = _session(request.session_id)
+            _progress(session, "running", "Discovering Data Explorer controls")
             context = await _ensure_data_explorer_context(session, client)
             session["data_explorer_context"] = context
 
         if request and request.all_kpis and request.report_parameter:
+            if session is not None:
+                _progress(session, "running", "Reading all requested KPI tables")
             credentials = credentials or client._settings_credentials()
             multi = await client.extract_all_kpis(
                 credentials=credentials,
@@ -330,6 +360,8 @@ async def refresh(request: RefreshRequest | None = None) -> dict[str, object]:
                 "metrics": list(tables.keys()),
             }
         else:
+            if session is not None:
+                _progress(session, "running", "Reading current KPI table")
             report = await client.extract_key_measures_text(
                 credentials=credentials,
                 report_set=report_set,
@@ -350,6 +382,12 @@ async def refresh(request: RefreshRequest | None = None) -> dict[str, object]:
 
     if session is not None:
         _set_session_cache(session, table, report_info)
+        _progress(
+            session,
+            "done",
+            f"Prepared table: {len(table.products)} products, {len(table.dates)} dates",
+            active=False,
+        )
     else:
         _cached_table = table
         _cached_report = report_info
@@ -434,6 +472,8 @@ async def export_current_csv(session_id: str) -> Response:
 @app.post("/api/pivot/plan")
 async def pivot_plan(request: PivotPlanRequest) -> dict[str, object]:
     session = _session(request.session_id)
+    _reset_progress(session, "Plan Pivot query")
+    _progress(session, "running", "Opening Pivot Screen and discovering dimensions")
     credentials = session.get("credentials")
     if not isinstance(credentials, Credentials):
         raise HTTPException(status_code=400, detail="Session credentials are unavailable")
@@ -446,12 +486,15 @@ async def pivot_plan(request: PivotPlanRequest) -> dict[str, object]:
             )
         )
     except WorldpanelError as exc:
+        _progress(session, "error", str(exc), active=False)
         await _pivot_sessions.discard(request.session_id)
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     except Exception as exc:
+        _progress(session, "error", f"Pivot planning failed: {exc}", active=False)
         await _pivot_sessions.discard(request.session_id)
         raise HTTPException(status_code=500, detail=f"Pivot planning failed: {exc}") from exc
     if isinstance(result, PlanClarification):
+        _progress(session, "waiting", "Waiting for user clarification", active=False)
         return {
             "ok": True,
             "needs_clarification": True,
@@ -464,12 +507,15 @@ async def pivot_plan(request: PivotPlanRequest) -> dict[str, object]:
                 ],
             },
         }
+    _progress(session, "done", "Pivot query plan is ready", active=False)
     return {"ok": True, "needs_clarification": False, "plan": asdict(result)}
 
 
 @app.post("/api/pivot/execute")
 async def pivot_execute(request: PivotExecuteRequest) -> dict[str, object]:
     session = _session(request.session_id)
+    _reset_progress(session, "Execute Pivot query")
+    _progress(session, "running", "Applying Pivot layout, member selections, and KPI")
     credentials = session.get("credentials")
     if not isinstance(credentials, Credentials):
         raise HTTPException(status_code=400, detail="Session credentials are unavailable")
@@ -486,6 +532,7 @@ async def pivot_execute(request: PivotExecuteRequest) -> dict[str, object]:
     cache_scope = f"{credentials.email}|{current_report.get('report_parameter', '')}"
     cached = _pivot_result_cache.get(plan, cache_scope)
     if cached is not None:
+        _progress(session, "done", "Returned verified result from cache", active=False)
         if cached.tables:
             _activate_pivot_tables(cached.tables, current_report, session)
         response: dict[str, object] = {"ok": True, "receipt": asdict(cached.receipt)}
@@ -501,13 +548,16 @@ async def pivot_execute(request: PivotExecuteRequest) -> dict[str, object]:
             )
         )
     except WorldpanelError as exc:
+        _progress(session, "error", str(exc), active=False)
         await _pivot_sessions.discard(request.session_id)
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     except Exception as exc:
+        _progress(session, "error", f"Pivot execution failed: {exc}", active=False)
         await _pivot_sessions.discard(request.session_id)
         raise HTTPException(status_code=500, detail=f"Pivot execution failed: {exc}") from exc
 
     response = {"ok": True, "receipt": asdict(result.receipt)}
+    _progress(session, "running", "Parsing rendered table and preparing answer")
 
     # Make the freshly verified pivot result the table that /api/ask and
     # /api/check operate on, so the data checker inspects the current query.
@@ -546,6 +596,7 @@ async def pivot_execute(request: PivotExecuteRequest) -> dict[str, object]:
             tables=result.tables,
         ),
     )
+    _progress(session, "done", "Pivot data pull completed", active=False)
     return response
 
 
@@ -661,6 +712,36 @@ def _session(session_id: str) -> dict[str, object]:
 def _require_access_token(access_token: str | None) -> None:
     if access_token not in _access_tokens:
         raise HTTPException(status_code=403, detail="请先输入邀请码进入应用。")
+
+
+def _reset_progress(session: dict[str, object], title: str) -> None:
+    session["progress_events"] = []
+    session["progress_active"] = True
+    session["progress_current"] = title
+    _progress(session, "running", title)
+
+
+def _progress(
+    session: dict[str, object],
+    status: str,
+    message: str,
+    *,
+    active: bool | None = None,
+) -> None:
+    events = session.setdefault("progress_events", [])
+    if not isinstance(events, list):
+        events = []
+        session["progress_events"] = events
+    event = {
+        "status": status,
+        "message": message,
+        "at": datetime.now(timezone.utc).isoformat(),
+    }
+    events.append(event)
+    del events[:-_MAX_PROGRESS_EVENTS]
+    session["progress_current"] = message
+    if active is not None:
+        session["progress_active"] = active
 
 
 def _set_session_cache(
