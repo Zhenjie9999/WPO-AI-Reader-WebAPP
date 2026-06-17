@@ -510,6 +510,13 @@ def test_live_driver_rejects_kpi_switch_when_report_never_refreshes():
     assert "KPI selection did not refresh the report" in source
 
 
+def test_live_driver_does_not_reject_pivot_apply_only_because_text_delta_is_absent():
+    source = Path("app/worldpanel/pivot_driver.py").read_text(encoding="utf-8")
+
+    assert "Pivot apply did not refresh the report" not in source
+    assert "apply_pivot:no_text_delta" in source
+
+
 @pytest.mark.asyncio
 async def test_executor_rejects_unparseable_refreshed_table_and_never_returns_receipt():
     product = next(tag for tag in parse_dimension_tags(PIVOT_HTML) if tag.label == "Product")

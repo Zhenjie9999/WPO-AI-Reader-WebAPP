@@ -268,22 +268,27 @@ class PivotDriver:
         await button.wait_for(state="visible", timeout=self.timeout_ms)
         await self._legacy_click(button)
         deadline = asyncio.get_running_loop().time() + self.timeout_ms / 1000
+        changed = False
         while asyncio.get_running_loop().time() < deadline:
             if pivot.is_detached():
                 break
+            report = await self._wait_for_frame("DB_0001pp.aspx")
+            current_text = await report.locator("body").inner_text(timeout=self.timeout_ms)
+            if current_text != before_text:
+                changed = True
+                break
             await asyncio.sleep(0.1)
         report = await self._wait_for_frame("DB_0001pp.aspx")
-        while asyncio.get_running_loop().time() < deadline:
+        while not changed and asyncio.get_running_loop().time() < deadline:
             report = await self._wait_for_frame("DB_0001pp.aspx")
             await report.locator("body").wait_for(state="visible", timeout=self.timeout_ms)
             current_text = await report.locator("body").inner_text(timeout=self.timeout_ms)
             if current_text != before_text:
+                changed = True
                 break
             await asyncio.sleep(0.2)
-        else:
-            raise WorldpanelError("Pivot apply did not refresh the report")
         self.frames = PivotFrames(report=report)
-        self.actions.append("apply_pivot")
+        self.actions.append("apply_pivot" if changed else "apply_pivot:no_text_delta")
 
     async def read_applied_state(
         self,
