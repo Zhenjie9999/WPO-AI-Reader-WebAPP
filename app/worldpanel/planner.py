@@ -168,6 +168,40 @@ def _detect_period(question: str) -> str | None:
     return None
 
 
+# Canonical WPO option labels. The LLM phrases KPIs/calculations freely
+# (e.g. "Sales Amount", "Year on Year % Change"), so map them to the exact
+# labels the report dropdowns expose before the executor selects them.
+_KPI_CANON: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("Spend (RMB 000)", ("spend", "sales", "amount", "value", "销额", "销售额", "销售金额", "金额")),
+    ("Volume (000 kg)", ("volume", "销量", "销售量")),
+    ("Penetration %", ("penetration", "渗透")),
+    ("Buyers (000)", ("buyers", "buyer", "购买人数", "购买者", "买家")),
+    ("Frequency", ("frequency", "频次", "购买频次")),
+)
+
+
+def canonical_kpi(term: str) -> str:
+    n = normalize(term)
+    if not n:
+        return term
+    for canon, aliases in _KPI_CANON:
+        if any(normalize(alias) in n for alias in aliases):
+            return canon
+    return term
+
+
+def canonical_calculation(term: str | None) -> str | None:
+    if not term:
+        return None
+    detected = _detect_calculation(term)
+    if detected:
+        return detected
+    n = normalize(term)
+    if "actual" in n or "实际" in n:
+        return "Actual Yr on Yr"
+    return term
+
+
 def _detect_calculation(question: str) -> str | None:
     lowered = question.casefold()
     if any(token in lowered for token in ("yr on yr %", "yoy %", "同比增长", "增长率", "growth rate", "% change", "yoy growth")):

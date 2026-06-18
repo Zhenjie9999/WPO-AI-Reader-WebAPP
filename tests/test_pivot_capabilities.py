@@ -133,6 +133,33 @@ def test_chinese_product_names_map_to_english_members():
     assert _member_match_length("Apple", "榴莲销额") == 0
 
 
+def test_llm_kpi_terms_canonicalize_to_real_report_labels():
+    from app.worldpanel.planner import canonical_calculation, canonical_kpi
+
+    assert canonical_kpi("Sales Amount") == "Spend (RMB 000)"
+    assert canonical_kpi("销额") == "Spend (RMB 000)"
+    assert canonical_kpi("销售金额") == "Spend (RMB 000)"
+    assert canonical_kpi("Volume") == "Volume (000 kg)"
+    assert canonical_kpi("Penetration") == "Penetration %"
+    # An already-correct or unknown label is left unchanged.
+    assert canonical_kpi("Spend (RMB 000)") == "Spend (RMB 000)"
+    assert canonical_calculation("Year on Year % Change") == "Yr on Yr % Change"
+    assert canonical_calculation("同比增长率") == "Yr on Yr % Change"
+
+
+def test_exact_member_match_outranks_substring_so_no_false_ambiguity():
+    # 金果 / "Gold kiwifruit" must pick the exact node, not tie with the longer
+    # "Non-imported Gold Kiwifruit" / "Other Brands Gold Kiwifruit".
+    exact = _member_match_length("Gold kiwifruit", "", ("Gold kiwifruit",))
+    longer = _member_match_length("Non-imported Gold Kiwifruit", "", ("Gold kiwifruit",))
+    other = _member_match_length("Other Brands Gold Kiwifruit", "", ("Gold kiwifruit",))
+    assert exact > longer and exact > other
+    # Chinese alias term resolves the exact member, not the variants.
+    exact_cn = _member_match_length("Gold kiwifruit", "", ("金果",))
+    variant_cn = _member_match_length("Non-imported Gold Kiwifruit", "", ("金果",))
+    assert exact_cn > variant_cn
+
+
 def test_english_member_still_matches_without_alias():
     assert _question_may_require_members("Durian spend 2026 May") is True
     assert _member_match_length("Durian", "durianspend2026may") > 0

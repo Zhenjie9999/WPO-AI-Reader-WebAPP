@@ -16,7 +16,12 @@ from app.worldpanel.pivot_models import (
     PivotDiscovery,
     QueryPlan,
 )
-from app.worldpanel.planner import PlanClarification, StructuredPlanner
+from app.worldpanel.planner import (
+    PlanClarification,
+    StructuredPlanner,
+    canonical_calculation,
+    canonical_kpi,
+)
 from app.worldpanel.schema import SchemaService
 from app.worldpanel.session import DataExplorerSession, open_persistent_data_explorer
 
@@ -194,7 +199,16 @@ def _build_plan(
         for item in tentative.get("filters", [])
         if isinstance(item, dict) and item.get("role") and item.get("value")
     )
-    kpis = tuple(str(value) for value in tentative.get("kpis", []) if str(value).strip()) or ("Spend (RMB 000)",)
+    # Canonicalize KPI terms to the exact report labels (the LLM may say
+    # "Sales Amount" / "销额" for "Spend (RMB 000)").
+    kpis = tuple(
+        canonical_kpi(str(value))
+        for value in tentative.get("kpis", [])
+        if str(value).strip()
+    ) or ("Spend (RMB 000)",)
+    shape = str(tentative.get("output_shape") or "single_value").strip().lower().replace(" ", "_")
+    if shape not in {"single_value", "table", "comparison", "trend"}:
+        shape = "single_value"
     return QueryPlan(
         report_set=report_set,
         report=report,
@@ -202,8 +216,8 @@ def _build_plan(
         member_selections=members,
         kpis=kpis,
         expected_period=str(tentative["expected_period"]) if tentative.get("expected_period") else None,
-        output_shape=tentative.get("output_shape", "single_value"),
-        calculation=str(tentative["calculation"]) if tentative.get("calculation") else None,
+        output_shape=shape,  # type: ignore[arg-type]
+        calculation=canonical_calculation(str(tentative["calculation"])) if tentative.get("calculation") else None,
         filters=filters,
     )
 
@@ -316,22 +330,28 @@ def _member_match_length(
     if not normalized_label:
         return 0
     aliases = tuple(_normalize(a) for a in _MEMBER_ALIASES.get(normalized_label, ()))
+    # An exact label/alias match must always outrank a mere substring match, so
+    # "Gold kiwifruit" beats "Non-imported Gold Kiwifruit" for 金果 / "Gold
+    # kiwifruit" instead of tying and forcing a clarification.
+    _EXACT = 1000
     best = 0
     if len(normalized_label) >= 3 and normalized_label in normalized_question:
         best = len(normalized_label)
     for normalized_alias in aliases:
         if normalized_alias and normalized_alias in normalized_question:
-            best = max(best, len(normalized_alias) + 2)  # prefer explicit alias hits
+            best = max(best, _EXACT + len(normalized_alias))  # explicit alias = exact intent
     # LLM-provided terms (already translated to the English product name) match
     # the label directly, even if the raw label never appeared in the question.
     for term in extra_terms:
         normalized_term = _normalize(term)
         if not normalized_term:
             continue
-        if normalized_term == normalized_label or normalized_term in normalized_label or normalized_label in normalized_term:
-            best = max(best, len(normalized_term) + 1)
+        if normalized_term == normalized_label or any(alias == normalized_term for alias in aliases):
+            best = max(best, _EXACT + len(normalized_term))  # exact match
+        elif normalized_term in normalized_label or normalized_label in normalized_term:
+            best = max(best, len(normalized_term))  # substring match — lower priority
         elif any(alias and (alias in normalized_term or normalized_term in alias) for alias in aliases):
-            best = max(best, len(normalized_term) + 2)
+            best = max(best, len(normalized_term))
     return best
 
 
