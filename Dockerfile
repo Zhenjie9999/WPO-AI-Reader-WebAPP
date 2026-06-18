@@ -7,6 +7,9 @@ ENV WORLDPANEL_HEADLESS=true
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
+# Ensure the chromium build matching the installed playwright version exists,
+# so a base-image/package version drift never breaks browser launch.
+RUN python -m playwright install chromium
 
 COPY . .
 
