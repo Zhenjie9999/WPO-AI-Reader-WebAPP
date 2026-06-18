@@ -193,6 +193,32 @@ def test_pure_calculation_question_needs_no_member():
     assert _question_may_require_members("2026 May spend growth rate vs last year") is False
 
 
+def test_format_number_preserves_decimals_and_trims_whole_numbers():
+    from app.worldpanel.pivot_result import format_number
+
+    assert format_number(7.3) == "7.3"
+    assert format_number(46.27) == "46.27"
+    assert format_number(61.0) == "61"
+    assert format_number(2931643.0) == "2,931,643"
+    assert format_number(1234.5) == "1,234.5"
+
+
+def test_decimal_kpis_keep_their_decimals_in_the_answer():
+    pen = table_from_grid(["Gold kiwifruit"], [["15-May-26", ["7.3"]]], metric="Penetration %")
+    answer = answer_from_pivot_tables({"Penetration %": pen}, ["Gold kiwifruit"], "15-May-26")
+    assert "7.3%" in answer  # not "7" and not "+7.3%"
+
+    price = table_from_grid(["Gold kiwifruit"], [["15-May-26", ["46.27"]]], metric="Average Price (RMB)/(kg)")
+    answer = answer_from_pivot_tables({"Average Price (RMB)/(kg)": price}, ["Gold kiwifruit"], "15-May-26")
+    assert "46.27" in answer  # decimals kept
+
+
+def test_to_key_measures_keeps_float_values():
+    table = table_from_grid(["Gold kiwifruit"], [["15-May-26", ["7.3"]]], metric="Penetration %")
+    km = table.to_key_measures()
+    assert km.value_for("Gold kiwifruit", "15-May-26") == 7.3  # not rounded to 7
+
+
 def test_answer_uses_absolute_format_for_value_metric():
     table = table_from_grid(
         ["Fruit"],

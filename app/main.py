@@ -31,7 +31,7 @@ from app.worldpanel.multitable import MultiKpiTable
 from app.worldpanel.parser import KeyMeasuresTable, parse_key_measures_text
 from app.worldpanel.pivot_models import AxisPlacement, FilterSelection, MemberSelection, QueryPlan
 from app.worldpanel.pivot_cache import VerifiedResult, VerifiedResultCache
-from app.worldpanel.pivot_result import PivotResultError, answer_from_pivot_tables
+from app.worldpanel.pivot_result import PivotResultError, answer_from_pivot_tables, format_plain
 from app.worldpanel.pivot_service import PivotQueryService
 from app.worldpanel.planner import PlanClarification
 from app.worldpanel.query import answer_question
@@ -461,7 +461,7 @@ async def export_current_csv(session_id: str) -> Response:
                         product,
                         date_label,
                         metric,
-                        values.get(product, ""),
+                        format_plain(values[product]) if product in values else "",
                     ]
                 )
     return Response(
@@ -619,31 +619,21 @@ async def pivot_execute(request: PivotExecuteRequest) -> dict[str, object]:
     converted = _activate_pivot_tables(result.tables, current_report, session)
 
     if request.question:
-        answer_error: str | None = None
-        # Percentage / growth views (Yr-on-Yr % etc.) must be formatted as
-        # percentages, which the legacy KeyMeasures answerer cannot do, so use
-        # the orientation-aware pivot answerer for those.
-        is_percentage_view = bool(plan.calculation and "%" in plan.calculation)
+        # Always answer from the float-valued pivot result so decimals survive
+        # for every KPI (Penetration %, Average Price, Frequency, growth %, ...).
+        # The legacy KeyMeasures answerer rounds to int and cannot format
+        # percentages, so it is not used for pivot answers.
         member_leaves = [
             selection.member_path[-1]
             for selection in plan.member_selections
             if selection.checked and selection.member_path
         ]
-        if converted and not is_percentage_view:
-            try:
-                table, _report = _get_session_cache(session)
-                answer = answer_question(request.question, table)
-                response["answer"] = answer.text
-                response["data"] = asdict(answer)
-            except Exception as exc:
-                answer_error = str(exc)
-        if "answer" not in response:
-            try:
-                response["answer"] = answer_from_pivot_tables(
-                    result.tables, member_leaves, result.receipt.period
-                )
-            except PivotResultError as exc:
-                response["answer_error"] = answer_error or str(exc)
+        try:
+            response["answer"] = answer_from_pivot_tables(
+                result.tables, member_leaves, result.receipt.period
+            )
+        except PivotResultError as exc:
+            response["answer_error"] = str(exc)
 
     _pivot_result_cache.set(
         plan,
