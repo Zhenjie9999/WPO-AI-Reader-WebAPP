@@ -14,9 +14,10 @@ class KeyMeasuresTable:
     metric: str
     products: list[str]
     dates: list[str]
-    rows: dict[str, dict[str, int]]
+    # Values may be int (Spend) or float (Penetration %, Average Price, ...).
+    rows: dict[str, dict[str, float]]
 
-    def value_for(self, product: str, date_label: str, metric: str | None = None) -> int:
+    def value_for(self, product: str, date_label: str, metric: str | None = None) -> float:
         if metric and metric.lower() != self.metric.lower():
             raise KeyError(f"Metric not available: {metric}")
         canonical_product = _match_product(product, self.products)

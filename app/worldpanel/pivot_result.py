@@ -68,11 +68,14 @@ class PivotResultTable:
         axis = self.date_axis
         if axis is None:
             raise PivotResultError("Table has no date axis; cannot convert to KeyMeasuresTable")
+        # Preserve the raw values (do NOT round): decimal KPIs like Penetration
+        # %, Average Price, and Frequency must keep their decimals downstream
+        # (chat answer, CSV export, data checker).
         if axis == "row":
             dates, products = self.row_labels, self.column_labels
             rows = {
                 date: {
-                    product: round(self.cells[date][product])
+                    product: self.cells[date][product]
                     for product in products
                     if product in self.cells.get(date, {})
                 }
@@ -82,7 +85,7 @@ class PivotResultTable:
             dates, products = self.column_labels, self.row_labels
             rows = {
                 date: {
-                    product: round(self.cells[product][date])
+                    product: self.cells[product][date]
                     for product in products
                     if date in self.cells.get(product, {})
                 }
@@ -257,12 +260,11 @@ def answer_from_pivot_tables(
     """
     if not tables:
         raise PivotResultError("No pivot tables were parsed")
-    is_percent = lambda metric: "%" in metric or "change" in metric.casefold()
     lines: list[str] = []
     for metric, table in tables.items():
         terms = [leaf for leaf in member_leaves if _label_in_table(leaf, table)]
         period = period_label or (table.dates[-1] if table.dates else None)
-        fmt = (lambda value: f"{value:+.1f}%") if is_percent(metric) else (lambda value: f"{value:,.0f}")
+        fmt = _formatter_for(metric)
         if terms and period:
             value, row, column = table.value(terms[0], period)
             lines.append(f"{metric}：{fmt(value)}（{row} × {column}）")
@@ -288,6 +290,43 @@ def answer_from_pivot_tables(
             preview = "、".join(table.row_labels[:8])
             lines.append(f"{metric}：表格已刷新（{len(table.row_labels)} 行：{preview}…）")
     return "\n".join(lines)
+
+
+def format_number(value: float) -> str:
+    """Format a value with a thousands separator, preserving up to 2 decimals
+    and trimming trailing zeros, so 7.3 -> '7.3', 46.27 -> '46.27', and whole
+    numbers like 2931643.0 -> '2,931,643' (no spurious '.0')."""
+    if value is None:
+        return ""
+    if abs(value - round(value)) < 1e-9:
+        return f"{round(value):,}"
+    return f"{value:,.2f}".rstrip("0").rstrip(".")
+
+
+def format_plain(value: float) -> str:
+    """Plain numeric string (no thousands separators) for CSV/data, decimals
+    preserved and trailing zeros trimmed: 4000 -> '4000', 7.3 -> '7.3'."""
+    if value is None:
+        return ""
+    if abs(value - round(value)) < 1e-9:
+        return str(round(value))
+    return f"{value:.4f}".rstrip("0").rstrip(".")
+
+
+def _formatter_for(metric: str):
+    lowered = metric.casefold()
+    is_change = any(token in lowered for token in ("change", "yr on yr", "同比", "环比", "difference"))
+    is_level_percent = ("%" in metric) and not is_change
+
+    def fmt(value: float) -> str:
+        if is_change:
+            sign = "+" if value >= 0 else ""
+            return f"{sign}{format_number(value)}%"
+        if is_level_percent:
+            return f"{format_number(value)}%"
+        return format_number(value)
+
+    return fmt
 
 
 def _label_in_table(term: str, table: PivotResultTable) -> bool:
