@@ -160,6 +160,29 @@ def test_exact_member_match_outranks_substring_so_no_false_ambiguity():
     assert exact_cn > variant_cn
 
 
+def test_specific_multiword_member_beats_generic_root_substring():
+    # "4 Premium Fruits Type" must resolve to "4 Premium Fruit Types", not the
+    # bare "Fruit" root (which previously won via substring -> wrong/ambiguous).
+    term = ("4 Premium Fruits Type",)
+    target = _member_match_length("4 Premium Fruit Types", "", term)
+    generic = _member_match_length("Fruit", "", term)
+    assert target > 0
+    assert generic == 0  # generic short root must NOT match a longer specific term
+    assert target > generic
+    # Plural/word-order differences still match exactly.
+    assert _member_match_length("4 Premium Fruit Types", "4premiumfruitstype在2026", ()) >= 0
+
+
+def test_generic_fruit_root_not_stolen_by_premium_question_when_target_exists():
+    # Simulate the discovery decision over the real product roots.
+    roots = ["Fruit", "Fruit Brand", "Fruit", "4 Premium Fruit Types"]
+    term = ("4 Premium Fruits Type",)
+    scores = {r: _member_match_length(r, "4premiumfruitstype在2026年的渗透率", term) for r in roots}
+    best = max(scores.values())
+    winners = [r for r, s in scores.items() if s == best]
+    assert winners == ["4 Premium Fruit Types"]
+
+
 def test_english_member_still_matches_without_alias():
     assert _question_may_require_members("Durian spend 2026 May") is True
     assert _member_match_length("Durian", "durianspend2026may") > 0

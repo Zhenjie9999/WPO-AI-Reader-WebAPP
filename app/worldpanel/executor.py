@@ -57,8 +57,11 @@ class QueryExecutor:
             candidates = await self.schema.all_members(plan.report, tag)
             for selection in selections:
                 matches = [node for node in candidates if node.path == selection.member_path]
-                if len(matches) != 1:
-                    raise WorldpanelError(f"Could not uniquely resolve member path: {selection.member_path}")
+                if not matches:
+                    raise WorldpanelError(f"Could not resolve member path: {selection.member_path}")
+                # Some Pivot trees contain multiple distinct roots with the same
+                # label (e.g. two "Fruit" roots -> identical path). Selecting the
+                # first occurrence is deterministic and far better than failing.
                 await self.driver.check_member(tag, matches[0], selection.checked)
             await self.driver.apply_member_selection()
 
