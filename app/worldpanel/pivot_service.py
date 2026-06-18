@@ -318,39 +318,64 @@ _MEMBER_ALIASES: dict[str, tuple[str, ...]] = {
 }
 
 
+def _depluralize(token: str) -> str:
+    return token[:-1] if len(token) > 3 and token.endswith("s") else token
+
+
+def _phrase_key(value: str) -> str:
+    """Order-preserving, plural/space/punctuation-insensitive key, so
+    '4 Premium Fruits Type' and '4 Premium Fruit Types' compare equal."""
+    tokens = re.findall(r"[a-z0-9]+|[一-鿿]", value.casefold())
+    return "".join(_depluralize(token) for token in tokens)
+
+
 def _member_match_length(
     label: str,
     normalized_question: str,
     extra_terms: tuple[str, ...] = (),
 ) -> int:
-    """Return how strongly a member label appears in the question or in an
-    LLM-provided product term, by the length of the matched term (English label
-    or a known alias). 0 means no match."""
+    """Score how strongly a member label matches the question or an LLM-provided
+    product term. Exact (incl. plural/space-insensitive) and alias matches rank
+    far above substring matches, and a short generic label (e.g. 'Fruit') is not
+    allowed to match merely because it is a substring of a longer, more specific
+    term (e.g. '4 Premium Fruits Type'). 0 means no match."""
     normalized_label = _normalize(label)
     if not normalized_label:
         return 0
+    label_key = _phrase_key(label)
     aliases = tuple(_normalize(a) for a in _MEMBER_ALIASES.get(normalized_label, ()))
-    # An exact label/alias match must always outrank a mere substring match, so
-    # "Gold kiwifruit" beats "Non-imported Gold Kiwifruit" for 金果 / "Gold
-    # kiwifruit" instead of tying and forcing a clarification.
     _EXACT = 1000
     best = 0
-    if len(normalized_label) >= 3 and normalized_label in normalized_question:
-        best = len(normalized_label)
+
+    # Alias appearing in the question is an explicit, exact intent.
     for normalized_alias in aliases:
         if normalized_alias and normalized_alias in normalized_question:
-            best = max(best, _EXACT + len(normalized_alias))  # explicit alias = exact intent
-    # LLM-provided terms (already translated to the English product name) match
-    # the label directly, even if the raw label never appeared in the question.
+            best = max(best, _EXACT + len(normalized_alias))
+    # The bare label appearing in the question is a weak, substring-level signal
+    # (kept for simple English questions like "apple spend"); it is always
+    # dominated by an exact match elsewhere.
+    if len(normalized_label) >= 3 and normalized_label in normalized_question:
+        best = max(best, len(normalized_label))
+
     for term in extra_terms:
         normalized_term = _normalize(term)
         if not normalized_term:
             continue
-        if normalized_term == normalized_label or any(alias == normalized_term for alias in aliases):
-            best = max(best, _EXACT + len(normalized_term))  # exact match
-        elif normalized_term in normalized_label or normalized_label in normalized_term:
-            best = max(best, len(normalized_term))  # substring match — lower priority
-        elif any(alias and (alias in normalized_term or normalized_term in alias) for alias in aliases):
+        term_key = _phrase_key(term)
+        if (
+            term_key == label_key
+            or normalized_term == normalized_label
+            or any(alias == normalized_term for alias in aliases)
+        ):
+            best = max(best, _EXACT + len(label_key))  # exact (plural/space-insensitive)
+        elif normalized_term in normalized_label:
+            best = max(best, len(normalized_term))  # term is part of a more specific label
+        elif normalized_label in normalized_term and len(normalized_label) >= 8:
+            # Only a long, specific label may match by being contained in the term;
+            # this blocks generic short labels like "Fruit" from matching
+            # "4 Premium Fruits Type".
+            best = max(best, len(normalized_label))
+        elif any(alias and alias in normalized_term for alias in aliases):
             best = max(best, len(normalized_term))
     return best
 
