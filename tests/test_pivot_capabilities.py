@@ -219,6 +219,103 @@ def test_to_key_measures_keeps_float_values():
     assert km.value_for("Gold kiwifruit", "15-May-26") == 7.3  # not rounded to 7
 
 
+def _make_node(label, path):
+    from app.worldpanel.pivot_models import MemberNode
+
+    return MemberNode(
+        label=label, value=label, path=tuple(path), level=len(path) - 1,
+        has_children=False, expanded=False, checked=False, selected=False,
+    )
+
+
+_PRODUCT_TAG = None
+_PRODUCT_NODES = None
+
+
+def _product_fixture():
+    global _PRODUCT_TAG, _PRODUCT_NODES
+    from app.worldpanel.pivot_models import DimensionTag
+
+    _PRODUCT_TAG = DimensionTag(label="Product", dimension_id="[Dim1]", axis="column", position=0)
+    _PRODUCT_NODES = [
+        _make_node("Fruit", ["Fruit"]),
+        _make_node("Apple", ["Fruit", "Apple"]),
+        _make_node("Cherry", ["Fruit", "Cherry"]),
+        _make_node("Durian", ["Fruit", "Durian"]),
+        _make_node("Fruit Brand", ["Fruit Brand"]),
+        _make_node("Fruit", ["Fruit"]),  # duplicate-label root
+        _make_node("4 Premium Fruit Types", ["4 Premium Fruit Types"]),
+    ]
+    return _PRODUCT_TAG, tuple(_PRODUCT_NODES)
+
+
+async def _discover(question, extra_terms):
+    import app.worldpanel.pivot_service as svc
+    tag, nodes = _product_fixture()
+
+    class _Schema:
+        async def all_members(self, report, t):
+            return nodes
+
+    class _Driver:
+        async def cancel_member_selection(self):
+            pass
+
+    return await svc._discover_members_from_question(
+        question, "R", (tag,), _Schema(), _Driver(), extra_terms=extra_terms
+    )
+
+
+def test_term_match_prefers_specific_node_over_generic_root():
+    from app.worldpanel.pivot_service import _term_match
+
+    assert _term_match("4 Premium Fruit Types", "4 Premium Fruits", "") > _term_match("Fruit", "4 Premium Fruits", "")
+    assert _term_match("Fruit", "4 Premium Fruits", "") == 0
+
+
+@pytest.mark.asyncio
+async def test_4_premium_fruits_resolves_to_specific_member_not_fruit():
+    result = await _discover("2026年5月4 Premium Fruits的销额", ("4 Premium Fruits",))
+    paths = [tuple(s["member_path"]) for s in result]
+    assert ("4 Premium Fruit Types",) in paths
+    assert ("Fruit",) not in paths
+
+
+@pytest.mark.asyncio
+async def test_total_fruit_and_premium_select_both_members():
+    result = await _discover("整体水果和4 Premium Fruits的表现", ("Fruit", "4 Premium Fruits"))
+    paths = {tuple(s["member_path"]) for s in result}
+    assert ("Fruit",) in paths
+    assert ("4 Premium Fruit Types",) in paths
+
+
+def test_accumulate_export_rows_merges_across_queries():
+    from app.worldpanel.parser import KeyMeasuresTable
+    from app.main import _accumulate_export_rows
+
+    session: dict = {}
+    rep = {"report_set": "S", "report_name": "R"}
+    t1 = KeyMeasuresTable(title="t", metric="Spend (RMB 000)", products=["Cherry"], dates=["15-May-26"], rows={"15-May-26": {"Cherry": 100.0}})
+    t2 = KeyMeasuresTable(title="t", metric="Spend (RMB 000)", products=["Durian"], dates=["15-May-26"], rows={"15-May-26": {"Durian": 200.0}})
+    _accumulate_export_rows(session, {"Spend (RMB 000)": t1}, rep)
+    _accumulate_export_rows(session, {"Spend (RMB 000)": t2}, rep)
+    rows = session["export_rows"]
+    assert ("S", "R", "Spend (RMB 000)", "Cherry", "15-May-26") in rows
+    assert ("S", "R", "Spend (RMB 000)", "Durian", "15-May-26") in rows
+
+
+def test_restore_pivot_report_reattaches_after_session_loss():
+    from app.main import _restore_pivot_report
+
+    class _PS:
+        current_report = None
+
+    ps = _PS()
+    http = {"current_report": {"report_set": "S", "report_parameter": "P", "report_name": "R"}}
+    _restore_pivot_report(http, ps)
+    assert ps.current_report["report_parameter"] == "P"
+
+
 def test_answer_uses_absolute_format_for_value_metric():
     table = table_from_grid(
         ["Fruit"],
