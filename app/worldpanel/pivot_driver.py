@@ -296,7 +296,24 @@ class PivotDriver:
     async def check_member(self, tag: DimensionTag, member: MemberNode, checked: bool = True) -> None:
         await self._ensure_selector(tag)
         selector = self._require_selector()
-        changed = await selector.evaluate(
+        await self._wait_for_members_tree(selector)
+        changed = False
+        for _ in range(3):  # retry transient client-state lag (no delay once changed)
+            changed = await self._check_member_once(selector, member, checked)
+            if changed:
+                break
+            await asyncio.sleep(0.2)
+        if not changed:
+            raise WorldpanelError(f"Could not set member selection: {' > '.join(member.path)}")
+        self.actions.append(f"check:{tag.label}:{' > '.join(member.path)}:{checked}")
+        selected = self._selected_members.setdefault(normalize(tag.label), set())
+        if checked:
+            selected.add(member.path)
+        else:
+            selected.discard(member.path)
+
+    async def _check_member_once(self, selector: Frame, member: MemberNode, checked: bool) -> bool:
+        return await selector.evaluate(
             """
             ({path, checked}) => {
               const tree = window.membersTree || $find('ctl00_cphMain_trvSimpleSelector');
@@ -319,28 +336,26 @@ class PivotDriver:
             """,
             {"path": list(member.path), "checked": checked},
         )
-        if not changed:
-            raise WorldpanelError(f"Could not set member selection: {' > '.join(member.path)}")
-        self.actions.append(f"check:{tag.label}:{' > '.join(member.path)}:{checked}")
-        selected = self._selected_members.setdefault(normalize(tag.label), set())
-        if checked:
-            selected.add(member.path)
-        else:
-            selected.discard(member.path)
 
     async def clear_member_selection(self, tag: DimensionTag) -> None:
         await self._ensure_selector(tag)
         selector = self._require_selector()
-        cleared = await selector.evaluate(
-            """
-            () => {
-              const tree = window.membersTree || $find('ctl00_cphMain_trvSimpleSelector');
-              if (!tree) return false;
-              tree.unselectAllNodes();
-              return tree.get_selectedNodes().length === 0;
-            }
-            """
-        )
+        await self._wait_for_members_tree(selector)
+        cleared = False
+        for _ in range(3):  # retry transient client-state lag (no delay once cleared)
+            cleared = await selector.evaluate(
+                """
+                () => {
+                  const tree = window.membersTree || $find('ctl00_cphMain_trvSimpleSelector');
+                  if (!tree) return false;
+                  tree.unselectAllNodes();
+                  return tree.get_selectedNodes().length === 0;
+                }
+                """
+            )
+            if cleared:
+                break
+            await asyncio.sleep(0.2)
         if not cleared:
             raise WorldpanelError(f"Could not clear member selection: {tag.label}")
         self._selected_members[normalize(tag.label)] = set()
@@ -553,8 +568,34 @@ class PivotDriver:
         return ""
 
     async def _ensure_selector(self, tag: DimensionTag) -> None:
-        if not self.frames or not self.frames.selector or self.active_dimension != tag.label:
+        if (
+            not self.frames
+            or not self.frames.selector
+            or self.frames.selector.is_detached()
+            or self.active_dimension != tag.label
+        ):
             await self.open_member_selector(tag)
+
+    async def _wait_for_members_tree(self, selector: Frame) -> None:
+        """Wait until the Telerik member tree's client object is initialized and
+        populated. Returns as soon as it is ready (no fixed delay on the happy
+        path); needed because the dialog DOM can be visible a beat before the
+        RadTreeView client API (window.membersTree) is usable — a flaky failure
+        that is much more likely on a slow (free-tier) instance."""
+        deadline = asyncio.get_running_loop().time() + self.timeout_ms / 1000
+        while asyncio.get_running_loop().time() < deadline:
+            ready = await selector.evaluate(
+                """
+                () => {
+                  const tree = window.membersTree || $find('ctl00_cphMain_trvSimpleSelector');
+                  return !!(tree && tree.get_allNodes && tree.get_allNodes().length > 0);
+                }
+                """
+            )
+            if ready:
+                return
+            await asyncio.sleep(0.1)
+        raise WorldpanelError("Member tree did not become ready")
 
     async def _node_by_path(self, path: tuple[str, ...]) -> Locator:
         selector = self._require_selector()
