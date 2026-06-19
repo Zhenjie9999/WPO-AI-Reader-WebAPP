@@ -446,24 +446,33 @@ async def check_data(request: CheckRequest | None = None) -> dict[str, object]:
 
 @app.get("/api/export.csv")
 async def export_current_csv(session_id: str) -> Response:
-    table, report = _get_session_cache(_session(session_id))
+    session = _session(session_id)
     output = StringIO()
     writer = csv.writer(output)
     writer.writerow(["report_set", "report_name", "product", "date", "metric", "value"])
-    for metric, metric_table in _iter_metric_tables(table):
-        for date_label in metric_table.dates:
-            values = metric_table.rows.get(date_label, {})
-            for product in metric_table.products:
-                writer.writerow(
-                    [
-                        (report or {}).get("report_set", ""),
-                        (report or {}).get("report_name", ""),
-                        product,
-                        date_label,
-                        metric,
-                        format_plain(values[product]) if product in values else "",
-                    ]
-                )
+    export_rows = session.get("export_rows")
+    if isinstance(export_rows, dict) and export_rows:
+        # Whole-conversation export: every (report, metric, product, date) ever
+        # pulled, not just the latest question.
+        for (report_set, report_name, metric, product, date_label), value in export_rows.items():
+            writer.writerow([report_set, report_name, product, date_label, metric, format_plain(value)])
+    else:
+        # Fallback: the legacy single cached table.
+        table, report = _get_session_cache(session)
+        for metric, metric_table in _iter_metric_tables(table):
+            for date_label in metric_table.dates:
+                values = metric_table.rows.get(date_label, {})
+                for product in metric_table.products:
+                    writer.writerow(
+                        [
+                            (report or {}).get("report_set", ""),
+                            (report or {}).get("report_name", ""),
+                            product,
+                            date_label,
+                            metric,
+                            format_plain(values[product]) if product in values else "",
+                        ]
+                    )
     return Response(
         content=output.getvalue(),
         media_type="text/csv; charset=utf-8",
@@ -480,6 +489,7 @@ async def pivot_plan(request: PivotPlanRequest) -> dict[str, object]:
     if not isinstance(credentials, Credentials):
         raise HTTPException(status_code=400, detail="Session credentials are unavailable")
     pivot_session = _pivot_sessions.get_or_create(request.session_id)
+    _restore_pivot_report(session, pivot_session)
     clarification = request.clarification.model_dump() if request.clarification else None
     try:
         result = await pivot_session.serialized(
@@ -523,6 +533,7 @@ async def pivot_discover(request: PivotPlanRequest) -> dict[str, object]:
     if not isinstance(credentials, Credentials):
         raise HTTPException(status_code=400, detail="Session credentials are unavailable")
     pivot_session = _pivot_sessions.get_or_create(request.session_id)
+    _restore_pivot_report(session, pivot_session)
     if not pivot_session.current_report:
         raise HTTPException(status_code=400, detail="请先在左侧选择 Data Explorer 报表并点击“读取所选报表”。")
     try:
@@ -575,6 +586,7 @@ async def pivot_execute(request: PivotExecuteRequest) -> dict[str, object]:
     if not isinstance(credentials, Credentials):
         raise HTTPException(status_code=400, detail="Session credentials are unavailable")
     pivot_session = _pivot_sessions.get_or_create(request.session_id)
+    _restore_pivot_report(session, pivot_session)
     current_report = pivot_session.current_report
     if not current_report:
         raise HTTPException(status_code=400, detail="请先在左侧选择 Data Explorer 报表并点击“读取所选报表”。")
@@ -617,6 +629,8 @@ async def pivot_execute(request: PivotExecuteRequest) -> dict[str, object]:
     # Make the freshly verified pivot result the table that /api/ask and
     # /api/check operate on, so the data checker inspects the current query.
     converted = _activate_pivot_tables(result.tables, current_report, session)
+    # Accumulate across the whole conversation so CSV export covers every query.
+    _accumulate_export_rows(session, converted, current_report)
 
     if request.question:
         # Always answer from the float-valued pivot result so decimals survive
@@ -791,6 +805,41 @@ def _progress(
     session["progress_current"] = message
     if active is not None:
         session["progress_active"] = active
+
+
+def _restore_pivot_report(http_session: dict[str, object], pivot_session) -> None:
+    """Re-attach the prepared report to a pivot session that was recreated after
+    an error or TTL expiry, so the next question auto-reprepares the browser
+    transparently — the user never has to click 'prepare report' again."""
+    if getattr(pivot_session, "current_report", None):
+        return
+    report = http_session.get("current_report")
+    if isinstance(report, dict) and report.get("report_parameter"):
+        pivot_session.current_report = {
+            "report_set": str(report.get("report_set", "")),
+            "report_parameter": str(report.get("report_parameter", "")),
+            "report_name": str(report.get("report_name", "")),
+        }
+
+
+def _accumulate_export_rows(
+    session: dict[str, object],
+    converted: dict[str, KeyMeasuresTable],
+    report: dict[str, object],
+) -> None:
+    """Accumulate every value seen across the whole conversation, keyed by
+    (report, metric, product, date), so CSV export covers all processed data —
+    not just the latest question."""
+    rows = session.get("export_rows")
+    if not isinstance(rows, dict):
+        rows = {}
+        session["export_rows"] = rows
+    report_set = str(report.get("report_set", ""))
+    report_name = str(report.get("report_name", ""))
+    for metric, table in converted.items():
+        for date_label, products in table.rows.items():
+            for product, value in products.items():
+                rows[(report_set, report_name, metric, product, date_label)] = value
 
 
 def _set_session_cache(

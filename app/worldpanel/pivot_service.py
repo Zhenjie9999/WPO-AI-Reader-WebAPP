@@ -322,11 +322,60 @@ def _depluralize(token: str) -> str:
     return token[:-1] if len(token) > 3 and token.endswith("s") else token
 
 
-def _phrase_key(value: str) -> str:
-    """Order-preserving, plural/space/punctuation-insensitive key, so
-    '4 Premium Fruits Type' and '4 Premium Fruit Types' compare equal."""
-    tokens = re.findall(r"[a-z0-9]+|[一-鿿]", value.casefold())
-    return "".join(_depluralize(token) for token in tokens)
+def _tokens(value: str) -> set[str]:
+    """Plural-insensitive token set; Latin words and individual CJK characters."""
+    return {_depluralize(token) for token in re.findall(r"[a-z0-9]+|[一-鿿]", value.casefold())}
+
+
+_EXACT = 10000
+_STRONG = 1000
+
+
+def _term_match(label: str, term: str, normalized_question: str) -> int:
+    """Score one member label against one product term (+ the question, for
+    aliases). Token-aware so 'Fruit'/总水果 -> the bare 'Fruit' root, while
+    '4 Premium Fruits' -> the more specific '4 Premium Fruit Types'."""
+    normalized_label = _normalize(label)
+    if not normalized_label:
+        return 0
+    label_tokens = _tokens(label)
+    aliases = tuple(_normalize(a) for a in _MEMBER_ALIASES.get(normalized_label, ()))
+    normalized_term = _normalize(term)
+
+    if not normalized_term:
+        # Question-level signals only — used when no specific term is given.
+        # These are intentionally NOT applied per product term, otherwise a
+        # generic alias anywhere in the question (e.g. 水果 in 整体水果) would make
+        # 'Fruit' win for every term, including '4 Premium Fruits'.
+        best = 0
+        for alias in aliases:
+            if alias and alias in normalized_question:
+                best = max(best, _EXACT + len(alias))
+        if len(normalized_label) >= 3 and normalized_label in normalized_question:
+            best = max(best, len(normalized_label))
+        return best
+
+    # Term-level matching: score this label only against this product term.
+    term_tokens = _tokens(term)
+    if normalized_term == normalized_label or term_tokens == label_tokens or any(a == normalized_term for a in aliases):
+        return _EXACT + len(normalized_label)  # exact (plural/space-insensitive) or alias-equals-term
+    if term_tokens and term_tokens <= label_tokens:
+        return _STRONG + len(term_tokens)  # every term word in a more specific label
+    if label_tokens <= term_tokens and len(label_tokens) >= 2:
+        return _STRONG // 2 + len(label_tokens)  # multi-word label inside a longer term
+    if normalized_term in normalized_label:
+        return len(normalized_term)
+    if any(a and a in normalized_term for a in aliases):
+        return len(normalized_term)
+    return 0
+
+
+def _alias_seed_terms(normalized_question: str) -> list[str]:
+    return [
+        label
+        for label, aliases in _MEMBER_ALIASES.items()
+        if any(_normalize(a) in normalized_question for a in aliases)
+    ]
 
 
 def _member_match_length(
@@ -334,49 +383,10 @@ def _member_match_length(
     normalized_question: str,
     extra_terms: tuple[str, ...] = (),
 ) -> int:
-    """Score how strongly a member label matches the question or an LLM-provided
-    product term. Exact (incl. plural/space-insensitive) and alias matches rank
-    far above substring matches, and a short generic label (e.g. 'Fruit') is not
-    allowed to match merely because it is a substring of a longer, more specific
-    term (e.g. '4 Premium Fruits Type'). 0 means no match."""
-    normalized_label = _normalize(label)
-    if not normalized_label:
-        return 0
-    label_key = _phrase_key(label)
-    aliases = tuple(_normalize(a) for a in _MEMBER_ALIASES.get(normalized_label, ()))
-    _EXACT = 1000
-    best = 0
-
-    # Alias appearing in the question is an explicit, exact intent.
-    for normalized_alias in aliases:
-        if normalized_alias and normalized_alias in normalized_question:
-            best = max(best, _EXACT + len(normalized_alias))
-    # The bare label appearing in the question is a weak, substring-level signal
-    # (kept for simple English questions like "apple spend"); it is always
-    # dominated by an exact match elsewhere.
-    if len(normalized_label) >= 3 and normalized_label in normalized_question:
-        best = max(best, len(normalized_label))
-
+    """Best score of a label across the question and any provided product terms."""
+    best = _term_match(label, "", normalized_question)
     for term in extra_terms:
-        normalized_term = _normalize(term)
-        if not normalized_term:
-            continue
-        term_key = _phrase_key(term)
-        if (
-            term_key == label_key
-            or normalized_term == normalized_label
-            or any(alias == normalized_term for alias in aliases)
-        ):
-            best = max(best, _EXACT + len(label_key))  # exact (plural/space-insensitive)
-        elif normalized_term in normalized_label:
-            best = max(best, len(normalized_term))  # term is part of a more specific label
-        elif normalized_label in normalized_term and len(normalized_label) >= 8:
-            # Only a long, specific label may match by being contained in the term;
-            # this blocks generic short labels like "Fruit" from matching
-            # "4 Premium Fruits Type".
-            best = max(best, len(normalized_label))
-        elif any(alias and alias in normalized_term for alias in aliases):
-            best = max(best, len(normalized_term))
+        best = max(best, _term_match(label, term, normalized_question))
     return best
 
 
@@ -389,42 +399,59 @@ async def _discover_members_from_question(
     extra_terms: tuple[str, ...] = (),
 ) -> list[dict[str, Any]] | PlanClarification:
     normalized_question = _normalize(question)
-    selections: list[dict[str, Any]] = []
+    # Candidate product phrases: LLM products + the question's own tokens +
+    # English labels whose Chinese alias appears. Iterating per term lets one
+    # question select several members (e.g. 'Fruit and 4 Premium Fruits').
+    terms = [t for t in extra_terms if t and t.strip()]
+    terms += _candidate_tokens(question)
+    terms += _alias_seed_terms(normalized_question)
+    terms = list(dict.fromkeys(t.strip() for t in terms if t.strip()))
+
+    members: list[tuple[DimensionTag, Any]] = []
     for tag in dimensions:
-        # Only Row/Column dimensions have a selectable member tree. Page/filter
-        # dimensions (Measures, Performance, Outlet, Duration, ...) are driven
-        # by report dropdowns, so never search them for members here.
+        # Only Row/Column dimensions have a selectable member tree; page/filter
+        # dimensions are driven by report dropdowns.
         if tag.axis not in ("row", "column"):
             continue
         try:
-            # Match against the fully enumerated member tree rather than the
-            # selector search box, which is unreliable; this is deterministic
-            # for both English labels and Chinese aliases.
             nodes = await schema.all_members(report, tag)
             await driver.cancel_member_selection()
         except WorldpanelError:
             continue
-        scored = [(node, _member_match_length(node.label, normalized_question, extra_terms)) for node in nodes]
-        matches = [node for node, score in scored if score > 0]
-        if not matches:
-            continue
-        longest = max(_member_match_length(node.label, normalized_question, extra_terms) for node in matches)
-        matches = [node for node in matches if _member_match_length(node.label, normalized_question, extra_terms) == longest]
-        unique_paths = tuple(dict.fromkeys(node.path for node in matches))
-        if len(unique_paths) != 1:
-            return PlanClarification(
-                dimension=tag.label,
-                question=f"Please choose the exact {tag.label} member path.",
-                candidates=unique_paths,
-            )
-        selections.append(
-            {"dimension": tag.label, "member_path": list(unique_paths[0]), "checked": True}
+        members += [(tag, node) for node in nodes]
+    if not members:
+        return PlanClarification(
+            dimension="member",
+            question="No selectable member tree is available.",
+            candidates=(),
         )
+
+    selections: list[dict[str, Any]] = []
+    seen: set[tuple[str, tuple[str, ...]]] = set()
+    for term in terms:
+        scored = [(tag, node, _term_match(node.label, term, normalized_question)) for tag, node in members]
+        best = max((score for _, _, score in scored), default=0)
+        if best <= 0:
+            continue
+        top = [(tag, node) for tag, node, score in scored if score == best]
+        unique = list(dict.fromkeys((tag.label, node.path) for tag, node in top))
+        if len(unique) != 1:
+            return PlanClarification(
+                dimension=top[0][0].label,
+                question=f"Please choose the exact {top[0][0].label} member path.",
+                candidates=tuple(dict.fromkeys(node.path for _, node in top)),
+            )
+        tag, node = top[0]
+        key = (tag.label, node.path)
+        if key not in seen:
+            seen.add(key)
+            selections.append({"dimension": tag.label, "member_path": list(node.path), "checked": True})
+
     if not selections:
         return PlanClarification(
             dimension="member",
             question="No exact live member label was found. Please specify the dimension and exact member label.",
-            candidates=tuple((tag.label,) for tag in dimensions),
+            candidates=tuple((tag.label,) for tag in dimensions if tag.axis in ("row", "column")),
         )
     return selections
 

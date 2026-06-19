@@ -266,8 +266,13 @@ def answer_from_pivot_tables(
         period = period_label or (table.dates[-1] if table.dates else None)
         fmt = _formatter_for(metric)
         if terms and period:
-            value, row, column = table.value(terms[0], period)
-            lines.append(f"{metric}：{fmt(value)}（{row} × {column}）")
+            # Report every requested member (e.g. "Fruit and 4 Premium Fruits").
+            parts = []
+            for term in terms:
+                value, row, column = table.value(term, period)
+                member = column if _match_label(period, (row,)) else row
+                parts.append(f"{member} {fmt(value)}")
+            lines.append(f"{metric}：" + "；".join(parts) + f"（{period}）")
         elif terms and len(terms) >= 2:
             value, row, column = table.value(terms[0], terms[1])
             lines.append(f"{metric}：{fmt(value)}（{row} × {column}）")
