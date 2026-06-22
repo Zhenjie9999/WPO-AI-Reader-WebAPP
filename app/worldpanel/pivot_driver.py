@@ -361,6 +361,34 @@ class PivotDriver:
         self._selected_members[normalize(tag.label)] = set()
         self.actions.append(f"clear_members:{tag.label}")
 
+    async def select_all_members(self, tag: DimensionTag) -> None:
+        """Select every leaf member of a dimension in one shot (for 'all
+        products' style questions) instead of checking members one by one."""
+        await self._ensure_selector(tag)
+        selector = self._require_selector()
+        await self._wait_for_members_tree(selector)
+        selected = False
+        for _ in range(3):
+            selected = await selector.evaluate(
+                """
+                () => {
+                  const tree = window.membersTree || $find('ctl00_cphMain_trvSimpleSelector');
+                  if (!tree) return false;
+                  const leaves = tree.get_allNodes().filter(
+                    n => !n.get_nodes || n.get_nodes().get_count() === 0
+                  );
+                  leaves.forEach(n => n.select());
+                  return tree.get_selectedNodes().length > 0;
+                }
+                """
+            )
+            if selected:
+                break
+            await asyncio.sleep(0.2)
+        if not selected:
+            raise WorldpanelError(f"Could not select all members: {tag.label}")
+        self.actions.append(f"select_all:{tag.label}")
+
     async def apply_member_selection(self) -> None:
         selector = self._require_selector()
         try:

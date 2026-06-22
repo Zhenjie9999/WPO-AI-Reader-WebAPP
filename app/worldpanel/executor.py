@@ -54,6 +54,12 @@ class QueryExecutor:
             if not tag:
                 raise WorldpanelError(f"Dimension is unavailable: {dimension}")
             await self.driver.clear_member_selection(tag)
+            # ("*",) is the "select every member of this dimension" sentinel
+            # (e.g. "all products"); use the fast bulk select instead of N checks.
+            if any(selection.member_path == ("*",) for selection in selections):
+                await self.driver.select_all_members(tag)
+                await self.driver.apply_member_selection()
+                continue
             candidates = await self.schema.all_members(plan.report, tag)
             for selection in selections:
                 matches = [node for node in candidates if node.path == selection.member_path]
@@ -168,6 +174,8 @@ def _verify_applied_state(plan: QueryPlan, state: AppliedPivotState) -> None:
         for dimension, paths in state.selected_members.items()
     }
     for selection in plan.member_selections:
+        if selection.member_path == ("*",):
+            continue  # "all members" — not verified per-path
         actual = actual_by_dimension.get(normalize(selection.dimension), set())
         requested = tuple(normalize(part) for part in selection.member_path)
         present = requested in actual
@@ -189,6 +197,8 @@ def _verify_rendered_members(
         for label in (*table.row_labels, *table.column_labels)
     }
     for selection in plan.member_selections:
+        if selection.member_path == ("*",):
+            continue  # "all members" — every member rendered, nothing to pin
         if not selection.checked or normalize(selection.dimension) not in rendered_dimensions:
             continue
         leaf = normalize(selection.member_path[-1])

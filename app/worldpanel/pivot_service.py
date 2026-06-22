@@ -19,6 +19,7 @@ from app.worldpanel.pivot_models import (
 from app.worldpanel.planner import (
     PlanClarification,
     StructuredPlanner,
+    _extract_json,
     canonical_calculation,
     canonical_kpi,
 )
@@ -79,6 +80,7 @@ class PivotQueryService:
                 schema,
                 driver,
                 extra_terms=tuple(extra_terms),
+                assistant=assistant,
             )
             if isinstance(resolved, PlanClarification):
                 return resolved
@@ -390,42 +392,85 @@ def _member_match_length(
     return best
 
 
-async def _discover_members_from_question(
-    question: str,
-    report: str,
-    dimensions: tuple[DimensionTag, ...],
-    schema: SchemaService,
-    driver,
-    extra_terms: tuple[str, ...] = (),
-) -> list[dict[str, Any]] | PlanClarification:
-    normalized_question = _normalize(question)
-    # Candidate product phrases: LLM products + the question's own tokens +
-    # English labels whose Chinese alias appears. Iterating per term lets one
-    # question select several members (e.g. 'Fruit and 4 Premium Fruits').
-    terms = [t for t in extra_terms if t and t.strip()]
-    terms += _candidate_tokens(question)
-    terms += _alias_seed_terms(normalized_question)
-    terms = list(dict.fromkeys(t.strip() for t in terms if t.strip()))
+_DATE_RE = re.compile(r"\d{1,2}-[A-Za-z]{3}-\d{2}")
 
-    members: list[tuple[DimensionTag, Any]] = []
-    for tag in dimensions:
-        # Only Row/Column dimensions have a selectable member tree; page/filter
-        # dimensions are driven by report dropdowns.
-        if tag.axis not in ("row", "column"):
-            continue
+
+def _is_time_dimension(tag: DimensionTag, nodes: list) -> bool:
+    """The time/period dimension is selected via the period, not as a product
+    member, so it must be kept out of member matching (otherwise the LLM/term
+    matcher can pick a date like '15-May-26' as a 'member')."""
+    label = _normalize(tag.label)
+    if any(token in label for token in ("period", "time", "date", "week", "duration", "时间", "期间", "日期")):
+        return True
+    leaves = [n for n in nodes if getattr(n, "label", "")]
+    return bool(leaves) and all(_DATE_RE.search(n.label) for n in leaves)
+
+
+def _asks_all_members(question: str) -> bool:
+    lowered = question.casefold()
+    all_word = any(w in lowered for w in ("所有", "全部", "每个", "各个", "all ", "every ", "list of", "列表", "都有哪些", "有哪些"))
+    member_word = any(w in lowered for w in ("product", "产品", "品类", "品牌", "brand", "sku", "item", "member", "成员", "category"))
+    return all_word and member_word
+
+
+def _primary_member_dimension(by_dim: dict) -> DimensionTag:
+    for tag in by_dim:
+        if "product" in _normalize(tag.label) or "产品" in tag.label:
+            return tag
+    return max(by_dim, key=lambda tag: len(by_dim[tag]))
+
+
+async def _llm_resolve_members(question: str, members: list, assistant) -> list[dict[str, Any]]:
+    """Fuzzy-map the question to the report's actual members using the LLM.
+
+    The model only chooses from the live member list (by index), so it can match
+    loosely (case/spacing/abbreviation/language) without inventing paths and
+    without any per-client alias dictionary."""
+    if assistant is None or not members:
+        return []
+    capped = members[:800]
+    lines = "\n".join(
+        f"{index}: {tag.label} > {' > '.join(node.path)}" for index, (tag, node) in enumerate(capped)
+    )
+    prompt = (
+        "Map the user's Worldpanel question to the report's ACTUAL members listed below. "
+        "Match loosely and fuzzily by meaning — ignore case, spacing, punctuation, abbreviations, "
+        "and language (Chinese/English). Pick EVERY member the question is about. If the user asks "
+        "for all/every product (所有/全部/每个产品), return all indices whose dimension is the product "
+        "dimension. Return JSON only: {\"indices\": [int, ...]}; if nothing matches, {\"indices\": []}.\n"
+        f"Question: {question}\n"
+        "Members (index: Dimension > path):\n" + lines
+    )
+    try:
+        response = await assistant.chat(prompt)
+        payload = _extract_json(response)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("LLM member resolution failed (%s: %s)", type(exc).__name__, exc)
+        return []
+    indices = payload.get("indices", [])
+    selections: list[dict[str, Any]] = []
+    seen: set[tuple[str, tuple[str, ...]]] = set()
+    for raw in indices:
         try:
-            nodes = await schema.all_members(report, tag)
-            await driver.cancel_member_selection()
-        except WorldpanelError:
+            index = int(raw)
+        except (TypeError, ValueError):
             continue
-        members += [(tag, node) for node in nodes]
-    if not members:
-        return PlanClarification(
-            dimension="member",
-            question="No selectable member tree is available.",
-            candidates=(),
-        )
+        if not (0 <= index < len(capped)):
+            continue
+        tag, node = capped[index]
+        key = (tag.label, node.path)
+        if key not in seen:
+            seen.add(key)
+            selections.append({"dimension": tag.label, "member_path": list(node.path), "checked": True})
+    return selections
 
+
+def _resolve_terms_deterministic(
+    normalized_question: str,
+    members: list,
+    terms: list[str],
+) -> list[dict[str, Any]]:
+    """Fast exact/alias/token resolution; best-effort, returns whatever it can."""
     selections: list[dict[str, Any]] = []
     seen: set[tuple[str, tuple[str, ...]]] = set()
     for term in terms:
@@ -436,24 +481,76 @@ async def _discover_members_from_question(
         top = [(tag, node) for tag, node, score in scored if score == best]
         unique = list(dict.fromkeys((tag.label, node.path) for tag, node in top))
         if len(unique) != 1:
-            return PlanClarification(
-                dimension=top[0][0].label,
-                question=f"Please choose the exact {top[0][0].label} member path.",
-                candidates=tuple(dict.fromkeys(node.path for _, node in top)),
-            )
+            continue  # ambiguous — leave it for the LLM / clarification
         tag, node = top[0]
         key = (tag.label, node.path)
         if key not in seen:
             seen.add(key)
             selections.append({"dimension": tag.label, "member_path": list(node.path), "checked": True})
+    return selections
 
-    if not selections:
+
+async def _discover_members_from_question(
+    question: str,
+    report: str,
+    dimensions: tuple[DimensionTag, ...],
+    schema: SchemaService,
+    driver,
+    extra_terms: tuple[str, ...] = (),
+    assistant=None,
+) -> list[dict[str, Any]] | PlanClarification:
+    normalized_question = _normalize(question)
+    by_dim: dict[DimensionTag, list] = {}
+    for tag in dimensions:
+        # Only Row/Column dimensions have a selectable member tree; page/filter
+        # dimensions are driven by report dropdowns.
+        if tag.axis not in ("row", "column"):
+            continue
+        try:
+            nodes = await schema.all_members(report, tag)
+            await driver.cancel_member_selection()
+        except WorldpanelError:
+            continue
+        nodes = list(nodes)
+        # The time/period dimension is targeted by the period, not as a member.
+        if _is_time_dimension(tag, nodes):
+            continue
+        by_dim[tag] = nodes
+    if not by_dim:
         return PlanClarification(
             dimension="member",
-            question="No exact live member label was found. Please specify the dimension and exact member label.",
-            candidates=tuple((tag.label,) for tag in dimensions if tag.axis in ("row", "column")),
+            question="No selectable member tree is available.",
+            candidates=(),
         )
-    return selections
+
+    # "All products / 所有产品" -> select every member of the product dimension.
+    if _asks_all_members(question):
+        tag = _primary_member_dimension(by_dim)
+        return [{"dimension": tag.label, "member_path": ["*"], "checked": True}]
+
+    members = [(tag, node) for tag, nodes in by_dim.items() for node in nodes]
+
+    # LLM-first fuzzy match against the live member labels (handles arbitrary
+    # client product names without any hard-coded dictionary).
+    llm_selections = await _llm_resolve_members(question, members, assistant)
+    if llm_selections:
+        return llm_selections
+
+    # Deterministic fallback: exact / alias / token matching (also used when the
+    # LLM is unavailable or returns nothing).
+    terms = [t for t in extra_terms if t and t.strip()]
+    terms += _candidate_tokens(question)
+    terms += _alias_seed_terms(normalized_question)
+    terms = list(dict.fromkeys(t.strip() for t in terms if t.strip()))
+    selections = _resolve_terms_deterministic(normalized_question, members, terms)
+    if selections:
+        return selections
+
+    return PlanClarification(
+        dimension="member",
+        question="未能在当前报表中匹配到你说的成员，请换个更接近报表里的名称，或指明维度与成员名。",
+        candidates=tuple((tag.label,) for tag in by_dim),
+    )
 
 
 def _normalize(value: str) -> str:
