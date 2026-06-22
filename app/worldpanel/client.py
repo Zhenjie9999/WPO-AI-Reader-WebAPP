@@ -305,14 +305,34 @@ class WorldpanelClient:
     async def _read_key_measures_frame(self, page: Page) -> tuple[str, str]:
         frame = page.frame_locator("#NavigationReportPanel")
         body = frame.locator("body")
-        await frame.get_by_text("Key Measures Data Table", exact=False).first.wait_for(
-            state="visible",
-            timeout=self.settings.timeout_ms,
-        )
+        # Readiness signal: the rendered data grid OR the "Key Measures Data
+        # Table" title, whichever appears first. Different Report Sets / accounts
+        # (and non-English UIs) may not show that exact English title even though
+        # the data table is present, so waiting only on the title text made the
+        # tool fail for those reports. The data grid is the universal signal.
+        grid = frame.locator("table.infoset, table[id$='_DB_0001_01']").first
+        title = frame.get_by_text("Key Measures Data Table", exact=False).first
+        deadline = asyncio.get_running_loop().time() + self.settings.timeout_ms / 1000
+        ready = False
+        while asyncio.get_running_loop().time() < deadline:
+            try:
+                if await grid.count() and await grid.is_visible():
+                    ready = True
+                    break
+                if await title.count() and await title.is_visible():
+                    ready = True
+                    break
+            except Exception:
+                pass
+            await asyncio.sleep(0.5)
+        if not ready:
+            raise WorldpanelError(
+                "打开了报表，但未在限定时间内渲染出可读取的数据表格。"
+                "请确认所选报表是 Data Explorer 的 Key Measures 数据表（而非图表或其它报表类型），"
+                "或稍后重试（服务器休眠/繁忙时首次加载较慢）。"
+            )
         text = await body.inner_text(timeout=self.settings.timeout_ms)
         iframe_url = await page.locator("#NavigationReportPanel").get_attribute("src") or ""
-        if "Key Measures Data Table" not in text:
-            raise WorldpanelError("Opened Data Explorer, but Key Measures table text was not found")
         return text, iframe_url
 
     async def _kpi_options(self, page: Page) -> list[KpiOption]:
