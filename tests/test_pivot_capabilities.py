@@ -289,6 +289,60 @@ async def test_total_fruit_and_premium_select_both_members():
     assert ("4 Premium Fruit Types",) in paths
 
 
+def test_asks_all_members_detection():
+    from app.worldpanel.pivot_service import _asks_all_members
+
+    assert _asks_all_members("给我所有product列表下的产品在2026年的销售额")
+    assert _asks_all_members("all products sales 2026")
+    assert _asks_all_members("全部品类的销额")
+    assert not _asks_all_members("金果2026年5月销额")
+    assert not _asks_all_members("2026年5月整体水果的销额")
+
+
+@pytest.mark.asyncio
+async def test_all_products_returns_select_all_sentinel():
+    import app.worldpanel.pivot_service as svc
+    tag, nodes = _product_fixture()
+
+    class _Schema:
+        async def all_members(self, report, t):
+            return nodes
+
+    class _Driver:
+        async def cancel_member_selection(self):
+            pass
+
+    res = await svc._discover_members_from_question(
+        "给我所有产品2026年的销售额", "R", (tag,), _Schema(), _Driver()
+    )
+    assert res == [{"dimension": "Product", "member_path": ["*"], "checked": True}]
+
+
+@pytest.mark.asyncio
+async def test_llm_fuzzy_resolves_member_against_live_list():
+    import json
+    import app.worldpanel.pivot_service as svc
+    tag, nodes = _product_fixture()  # index 3 == Durian (Fruit>Durian)
+
+    class _Schema:
+        async def all_members(self, report, t):
+            return nodes
+
+    class _Driver:
+        async def cancel_member_selection(self):
+            pass
+
+    class _AI:
+        async def chat(self, prompt):
+            assert "index: Dimension > path" in prompt  # live list was sent
+            return "result: " + json.dumps({"indices": [3]})
+
+    res = await svc._discover_members_from_question(
+        "帮我看下那个带刺的水果的销额", "R", (tag,), _Schema(), _Driver(), assistant=_AI()
+    )
+    assert [tuple(s["member_path"]) for s in res] == [("Fruit", "Durian")]
+
+
 def test_accumulate_export_rows_merges_across_queries():
     from app.worldpanel.parser import KeyMeasuresTable
     from app.main import _accumulate_export_rows
