@@ -332,12 +332,23 @@ async def refresh(request: RefreshRequest | None = None) -> dict[str, object]:
     elif request and request.report_set:
         report_set = request.report_set
 
+    table: KeyMeasuresTable | MultiKpiTable | None = None
+    report_info: dict[str, object] = {
+        "report_set": report_set,
+        "report_name": (request.report_name if request else None) or "Data Explorer",
+        "metrics": [],
+    }
     try:
         if request and request.session_id and request.report_parameter:
             session = _session(request.session_id)
             _progress(session, "running", "Discovering Data Explorer controls")
-            context = await _ensure_data_explorer_context(session, client)
-            session["data_explorer_context"] = context
+            try:
+                context = await _ensure_data_explorer_context(session, client)
+                session["data_explorer_context"] = context
+            except Exception:
+                # Legacy control discovery is Zespri-tuned; the Pivot Q&A path
+                # does not need it, so a failure here must not block preparation.
+                session.pop("data_explorer_context", None)
 
         if request and request.all_kpis and request.report_parameter:
             if session is not None:
@@ -354,8 +365,8 @@ async def refresh(request: RefreshRequest | None = None) -> dict[str, object]:
                 report.metric: parse_key_measures_text(report.text, metric_override=report.metric)
                 for report in multi.reports
             }
-            table: KeyMeasuresTable | MultiKpiTable = MultiKpiTable(tables=tables)
-            report_info: dict[str, object] = {
+            table = MultiKpiTable(tables=tables)
+            report_info = {
                 "report_set": multi.report_set,
                 "report_name": multi.report_name,
                 "iframe_url": multi.iframe_url,
@@ -370,35 +381,47 @@ async def refresh(request: RefreshRequest | None = None) -> dict[str, object]:
                 report_parameter=request.report_parameter if request else None,
                 report_name=request.report_name if request else None,
             )
-            table = parse_key_measures_text(report.text, metric_override=report.metric)
-            report_info = {
-                "report_set": report.report_set,
-                "report_name": report.report_name,
-                "iframe_url": report.iframe_url,
-                "metrics": [table.metric],
-            }
+            try:
+                table = parse_key_measures_text(report.text, metric_override=report.metric)
+                report_info = {
+                    "report_set": report.report_set,
+                    "report_name": report.report_name,
+                    "iframe_url": report.iframe_url,
+                    "metrics": [table.metric],
+                }
+            except Exception:
+                # The report opened but the legacy text parser (Zespri "Spend"
+                # layout) could not read it. Pivot Q&A reads the live DOM grid
+                # instead, so still report the prepare as successful.
+                table = None
+                report_info = {
+                    "report_set": report.report_set,
+                    "report_name": report.report_name,
+                    "iframe_url": report.iframe_url,
+                    "metrics": [],
+                }
     except WorldpanelError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"刷新报表数据失败：{exc}") from exc
 
     if session is not None:
-        _set_session_cache(session, table, report_info)
-        _progress(
-            session,
-            "done",
-            f"Prepared table: {len(table.products)} products, {len(table.dates)} dates",
-            active=False,
-        )
-    else:
+        if table is not None:
+            _set_session_cache(session, table, report_info)
+        _progress(session, "done", "Report prepared", active=False)
+    elif table is not None:
         _cached_table = table
         _cached_report = report_info
-    metrics = table.metrics if isinstance(table, MultiKpiTable) else [table.metric]
+    metrics = (
+        (table.metrics if isinstance(table, MultiKpiTable) else [table.metric])
+        if table is not None
+        else []
+    )
     return {
         "ok": True,
         "report": report_info,
-        "products": table.products,
-        "dates": table.dates,
+        "products": table.products if table is not None else [],
+        "dates": table.dates if table is not None else [],
         "metrics": metrics,
         "metric": metrics[0] if metrics else None,
         "context": _context_payload(session.get("data_explorer_context")) if request and request.session_id else None,
