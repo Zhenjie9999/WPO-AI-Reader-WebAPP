@@ -56,6 +56,38 @@ class PivotQueryService:
             _apply_clarification(tentative, clarification)
         dimensions = await schema.dimensions()
 
+        # Resolve axis-placement dimension names to live dimensions (the LLM may
+        # say "Channel" while the live dimension is "Outlet"). A breakdown
+        # dimension is placed on a Column so Period stays a clean date row axis,
+        # which keeps the answer readable ("by channel" -> one value per channel).
+        resolved_axes: list[dict[str, Any]] = []
+        for item in tentative.get("axis_placements", []):
+            if not isinstance(item, dict) or not item.get("dimension"):
+                continue
+            live = _resolve_dimension_name(str(item["dimension"]), dimensions)
+            if not live:
+                continue
+            axis = str(item.get("axis") or "column")
+            if axis not in ("row", "column"):
+                axis = "column"
+            resolved_axes.append({"dimension": live, "axis": "column", "position": 0})
+        tentative["axis_placements"] = resolved_axes
+
+        # A breakdown axis and a single-value filter on the SAME dimension
+        # contradict each other (e.g. "by channel" + channel=CVS would collapse
+        # the breakdown to one channel). The breakdown wins; drop such filters.
+        axis_dims = {_normalize(axis["dimension"]) for axis in resolved_axes}
+        if axis_dims:
+            kept_filters = []
+            for flt in tentative.get("filters", []):
+                if not isinstance(flt, dict) or not flt.get("role"):
+                    continue
+                flt_dim = _resolve_dimension_name(str(flt["role"]), dimensions)
+                if flt_dim and _normalize(flt_dim) in axis_dims:
+                    continue
+                kept_filters.append(flt)
+            tentative["filters"] = kept_filters
+
         # Product terms come from the LLM (translated/natural names) and from any
         # member the user explicitly clarified. We always resolve them against
         # the live member tree ourselves, so the model only needs to understand
@@ -87,6 +119,25 @@ class PivotQueryService:
             resolved_selections = resolved
 
         member_selections = clarified_selections or resolved_selections
+
+        # For a breakdown dimension placed on an axis (e.g. "by channel"), the
+        # user wants every member of that dimension shown. If the planner did not
+        # pin specific members for it, inject a select-all ("*") so the axis
+        # renders the full distribution instead of whatever was checked before.
+        selected_dims = {
+            _normalize(sel.get("dimension", ""))
+            for sel in member_selections
+            if sel.get("dimension")
+        }
+        for axis in resolved_axes:
+            dim = axis["dimension"]
+            if _normalize(dim) in selected_dims:
+                continue
+            member_selections.append(
+                {"dimension": dim, "member_path": ["*"], "checked": True}
+            )
+            selected_dims.add(_normalize(dim))
+
         return _build_plan(
             tentative,
             member_selections,
@@ -404,6 +455,41 @@ def _is_time_dimension(tag: DimensionTag, nodes: list) -> bool:
         return True
     leaves = [n for n in nodes if getattr(n, "label", "")]
     return bool(leaves) and all(_DATE_RE.search(n.label) for n in leaves)
+
+
+# Synonym groups so an LLM axis-dimension name ("Channel") resolves to the
+# live dimension label ("Outlet"), across report sets and languages.
+_DIM_SYNONYMS: tuple[set[str], ...] = (
+    {"channel", "channels", "outlet", "outlets", "retailer", "渠道", "零售商", "卖场", "业态"},
+    {"geography", "region", "market", "geo", "地区", "区域", "市场", "省份", "城市"},
+    {"product", "products", "category", "品类", "产品", "类别"},
+    {"period", "time", "date", "时间", "期间", "日期", "月份"},
+    {"measure", "measures", "kpi", "指标"},
+    {"calculation", "performance", "计算", "表现"},
+    {"duration", "时长", "周期"},
+    {"manufacturer", "brand", "厂商", "品牌"},
+)
+
+
+def _resolve_dimension_name(name: str, live_tags: tuple[DimensionTag, ...]) -> str | None:
+    """Map an LLM/free-text dimension name to an actual live dimension label."""
+    n = _normalize(name)
+    if not n:
+        return None
+    for tag in live_tags:
+        if _normalize(tag.label) == n:
+            return tag.label
+    for group in _DIM_SYNONYMS:
+        normalized_group = {_normalize(x) for x in group}
+        if any(g == n or g in n or n in g for g in normalized_group):
+            for tag in live_tags:
+                if _normalize(tag.label) in normalized_group:
+                    return tag.label
+    for tag in live_tags:
+        tl = _normalize(tag.label)
+        if tl and (tl in n or n in tl):
+            return tag.label
+    return None
 
 
 def _asks_all_members(question: str) -> bool:

@@ -378,3 +378,59 @@ def test_answer_uses_absolute_format_for_value_metric():
     )
     answer = answer_from_pivot_tables({"Spend (RMB 000)": table}, [], "15-May-26")
     assert "42,960,150" in answer
+
+
+def test_local_planner_detects_channel_breakdown_as_axis_not_filter():
+    from app.worldpanel.planner import _local_tentative_plan
+
+    plan = _local_tentative_plan("Blueberry在2026年5月，分渠道的销售额是什么样的？")
+    # The breakdown becomes a column axis (so every channel shows), NOT a filter.
+    assert {"dimension": "Channel", "axis": "column", "position": 0} in plan["axis_placements"]
+    assert plan["output_shape"] == "table"
+    assert all(f.get("role") != "channel" for f in plan["filters"])
+    # English phrasing works too.
+    plan_en = _local_tentative_plan("Show Blueberry sales by channel for May 2026")
+    assert any(a["dimension"] == "Channel" for a in plan_en["axis_placements"])
+
+
+def test_resolve_dimension_name_maps_channel_synonyms_to_live_outlet():
+    from app.worldpanel.pivot_models import DimensionTag
+    from app.worldpanel.pivot_service import _resolve_dimension_name
+
+    live = (
+        DimensionTag("Product", "d1", "row", 0),
+        DimensionTag("Outlet", "d2", "filter", 0),
+        DimensionTag("Period", "d3", "row", 1),
+    )
+    # English, Chinese and near-synonyms all resolve to the live "Outlet" dim.
+    assert _resolve_dimension_name("Channel", live) == "Outlet"
+    assert _resolve_dimension_name("channels", live) == "Outlet"
+    assert _resolve_dimension_name("渠道", live) == "Outlet"
+    assert _resolve_dimension_name("零售商", live) == "Outlet"
+    # Exact live label still wins.
+    assert _resolve_dimension_name("Product", live) == "Product"
+    # Unknown dimension stays unresolved (caller drops it).
+    assert _resolve_dimension_name("无关维度xyz", live) is None
+
+
+def test_channel_breakdown_answer_lists_every_channel_for_the_period():
+    # Period on rows, channels on columns: "Blueberry by channel in May 2026".
+    table = table_from_grid(
+        ["Hypermarket", "Supermarket", "CVS", "Ecommerce"],
+        [
+            ["16-May-25", ["10", "20", "30", "40"]],
+            ["15-May-26", ["11.5", "22.1", "33.0", "44.4"]],
+        ],
+        metric="Spend (RMB 000)",
+    )
+    # member_leaves carries the product (Blueberry) and the "*" select-all
+    # sentinel; neither is an axis label, so the answer falls to the
+    # "every column at this period" branch.
+    answer = answer_from_pivot_tables(
+        {"Spend (RMB 000)": table}, ["Blueberry", "*"], "15-May-26"
+    )
+    assert "Hypermarket 11.5" in answer
+    assert "Supermarket 22.1" in answer
+    assert "CVS 33" in answer
+    assert "Ecommerce 44.4" in answer
+    assert "15-May-26" in answer

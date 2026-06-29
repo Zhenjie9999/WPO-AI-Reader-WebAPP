@@ -120,6 +120,9 @@ def _local_tentative_plan(question: str) -> dict[str, Any]:
         flags=re.IGNORECASE,
     ):
         axes.append({"dimension": dimension.title(), "axis": axis.casefold(), "position": 0})
+    # Breakdown intent ("分渠道" / "by channel"): place that dimension on a
+    # column so every member is shown, mirroring the LLM planner's behaviour.
+    axes += _detect_breakdown_axes(question)
     kpis = []
     for name, aliases in (
         ("Spend (RMB 000)", ("spend", "sales value", "销售额")),
@@ -139,10 +142,33 @@ def _local_tentative_plan(question: str) -> dict[str, Any]:
         "expected_period": period,
         "calculation": calculation,
         "filters": filters,
-        "output_shape": "trend" if "trend" in question.casefold() or "趋势" in question else "single_value",
+        "output_shape": (
+            "table" if axes
+            else "trend" if "trend" in question.casefold() or "趋势" in question
+            else "single_value"
+        ),
         "planner_fallback": True,
         "planner_mode": "fallback",
     }
+
+
+# Phrases that mean "show this value distributed across every member of a
+# dimension" (a breakdown), mapped to the natural dimension name the resolver
+# then maps onto the live dimension (Channel -> Outlet, etc.).
+_BREAKDOWN_PATTERNS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("Channel", ("分渠道", "各渠道", "按渠道", "分业态", "各业态", "by channel", "per channel", "across channels", "by outlet")),
+    ("Geography", ("分地区", "各地区", "按地区", "分区域", "各区域", "分市场", "各市场", "by region", "by geography", "across regions", "by market")),
+    ("Product", ("分品类", "各品类", "按品类", "分品牌", "各品牌", "分产品", "各产品", "by category", "by product", "by brand", "across categories")),
+)
+
+
+def _detect_breakdown_axes(question: str) -> list[dict[str, Any]]:
+    lowered = question.casefold()
+    axes: list[dict[str, Any]] = []
+    for dimension, phrases in _BREAKDOWN_PATTERNS:
+        if any(phrase.casefold() in lowered for phrase in phrases):
+            axes.append({"dimension": dimension, "axis": "column", "position": 0})
+    return axes
 
 
 _MONTHS = "jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec"
@@ -268,10 +294,18 @@ def _planner_prompt(question: str) -> str:
         "车厘子->Cherry, 金果->Gold kiwifruit); do NOT guess exact hierarchy paths — the system resolves "
         "them against the live member tree. "
         "Use \"calculation\": \"Yr on Yr % Change\" for growth-rate / 同比增长 / vs last year questions. "
-        "Use \"filters\": [{\"role\": \"channel|duration|geography\", \"value\": \"...\"}] for "
-        "channel, duration, or region filters. The duration value must be exactly one of "
-        "STD, 52 w/e, 12 w/e, 4 w/e, or YTD — these are distinct (STD is the standard/single "
-        "period, YTD is year-to-date); never substitute one for another. "
+        "Use \"filters\": [{\"role\": \"channel|duration|geography\", \"value\": \"...\"}] only to pin "
+        "ONE specific value the user named (e.g. 'in CVS' -> channel=CVS, '华东地区' -> geography=华东). "
+        "The duration value must be exactly one of STD, 52 w/e, 12 w/e, 4 w/e, or YTD — these are "
+        "distinct (STD is the standard/single period, YTD is year-to-date); never substitute one for another. "
+        "IMPORTANT — breakdown vs filter: when the user wants a value DISTRIBUTED ACROSS every member "
+        "of a dimension rather than one value (phrases like 分渠道/各渠道/按渠道/分品类/各品类/分地区/各地区/"
+        "分品牌, or English 'by channel', 'by category', 'across regions', 'breakdown by', 'distribution by', "
+        "'split by', 'per channel', 'respectively'), do NOT use filters. Instead emit an axis_placement "
+        "{\"dimension\": <that dimension>, \"axis\": \"column\", \"position\": 0} so all members of that "
+        "dimension are shown side by side, and set \"output_shape\": \"table\". Map the dimension to its "
+        "natural name (渠道/channel -> Channel, 地区/region -> Geography, 品类/category/品牌/brand -> Product); "
+        "the system resolves it to the live dimension. "
         "Do not invent member paths.\nQuestion: "
         + question
     )

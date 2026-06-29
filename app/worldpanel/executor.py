@@ -42,9 +42,18 @@ class QueryExecutor:
                 raise WorldpanelError(f"Dimension is unavailable: {placement.dimension}")
             await self.driver.set_axis(tag, placement.axis, placement.position)
 
-        expected_layout = _layout_from_plan(plan)
         if plan.axis_placements:
-            await self.driver.verify_layout(expected_layout)
+            # Relaxed verification: we only require that each dimension we placed
+            # actually sits on its requested axis. Demanding full-axis equality
+            # breaks legitimate breakdowns, where the live pivot keeps other
+            # dimensions (e.g. Period on Row, Product on Column) alongside ours.
+            actual_layout = await self.driver.read_layout()
+            for placement in plan.axis_placements:
+                axis_values = {normalize(value) for value in actual_layout.axis(placement.axis)}
+                if normalize(placement.dimension) not in axis_values:
+                    raise WorldpanelError(
+                        f"Pivot {placement.axis} mismatch: {placement.dimension} not placed"
+                    )
 
         selections_by_dimension: dict[str, list] = {}
         for selection in plan.member_selections:
@@ -162,10 +171,13 @@ def _verify_applied_state(plan: QueryPlan, state: AppliedPivotState) -> None:
     if not state.table_refreshed:
         raise WorldpanelError("Applied table did not refresh")
     for placement in plan.axis_placements:
-        values = state.layout.axis(placement.axis)
-        if placement.position >= len(values) or normalize(values[placement.position]) != normalize(placement.dimension):
+        # Presence-based, not positional: a breakdown dimension only needs to be
+        # on its requested axis. The live pivot keeps other dimensions there too,
+        # so the exact index is not under our control and must not be asserted.
+        axis_values = {normalize(value) for value in state.layout.axis(placement.axis)}
+        if normalize(placement.dimension) not in axis_values:
             raise WorldpanelError(
-                f"Applied layout mismatch for {placement.dimension}: expected {placement.axis}[{placement.position}]"
+                f"Applied layout mismatch for {placement.dimension}: not on {placement.axis}"
             )
     actual_by_dimension = {
         normalize(dimension): {

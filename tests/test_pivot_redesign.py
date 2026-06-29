@@ -204,6 +204,9 @@ class _HonestDriver:
     async def verify_layout(self, expected):
         assert expected.rows == ("Product",)
 
+    async def read_layout(self):
+        return PivotLayout(rows=("Product",))
+
     async def check_member(self, tag, member, checked):
         assert member.path == self.gold.path
         self.actions.append("check")
@@ -546,6 +549,9 @@ async def test_executor_rejects_unparseable_refreshed_table_and_never_returns_re
 
         async def verify_layout(self, expected):
             pass
+
+        async def read_layout(self):
+            return PivotLayout(rows=("Product",))
 
         async def apply(self):
             pass
