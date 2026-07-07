@@ -278,7 +278,12 @@ class WorldpanelClient:
         current_value = await page.locator("#ctl00_cphMain_drpCommunity_Input").input_value()
         if report_set != current_value:
             await page.locator("#ctl00_cphMain_drpCommunity_Arrow").click()
-            await page.locator("#ctl00_cphMain_drpCommunity_DropDown li.rcbItem", has_text=report_set).click()
+            await _click_exact_dropdown_item(
+                page,
+                "#ctl00_cphMain_drpCommunity_DropDown li.rcbItem",
+                report_set,
+                "Report Set",
+            )
         await page.locator("#ctl00_cphMain_btnEnter").click()
         await page.wait_for_url("**/Commissioning/Pages/ReportSelector.aspx", timeout=self.settings.timeout_ms)
 
@@ -491,10 +496,12 @@ class WorldpanelClient:
             return
 
         await page.locator("#ctl00_cphMain_ReadyToUseReports1_drpCategories_Arrow").click()
-        await page.locator(
+        await _click_exact_dropdown_item(
+            page,
             "#ctl00_cphMain_ReadyToUseReports1_drpCategories_DropDown li.rcbItem",
-            has_text=category,
-        ).click()
+            category,
+            "Ready-to-Use category",
+        )
         await self._wait_for_ready_to_use_reports(page)
 
 
@@ -520,6 +527,24 @@ def _ready_to_use_report_id(onclick: str) -> str:
     if not match:
         raise WorldpanelError("Could not parse Ready-to-Use report id")
     return match.group(1)
+
+
+async def _click_exact_dropdown_item(page: Page, selector: str, label: str, field_name: str) -> None:
+    items = page.locator(selector)
+    labels = await items.all_text_contents()
+    index = _exact_label_index(labels, label)
+    if index is None:
+        options = ", ".join(_clean_text(option) for option in labels[:10])
+        raise WorldpanelError(f"Could not find exact {field_name} '{label}'. Available options: {options}")
+    await items.nth(index).click()
+
+
+def _exact_label_index(labels: list[str], requested: str) -> int | None:
+    requested_clean = _clean_text(requested)
+    for index, label in enumerate(labels):
+        if _clean_text(label) == requested_clean:
+            return index
+    return None
 
 
 def _clean_text(value: str) -> str:
