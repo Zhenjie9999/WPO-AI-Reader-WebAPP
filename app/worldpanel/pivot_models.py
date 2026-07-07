@@ -5,7 +5,7 @@ from typing import Literal
 
 
 Axis = Literal["row", "column", "filter", "available"]
-OutputShape = Literal["single_value", "table", "comparison", "trend"]
+OutputShape = Literal["single_value", "table", "comparison", "trend", "ranking"]
 
 
 @dataclass(frozen=True)
@@ -31,6 +31,20 @@ class FilterSelection:
 
 
 @dataclass(frozen=True)
+class RankingSpec:
+    """Superlative intent ("哪个品牌渗透率最高" / "top 3 brands"): order the
+    rendered members by value at the resolved period and answer the extremes.
+
+    `dimension` is the natural-language dimension the user ranked over (品牌 /
+    渠道 / 品类, ...); the service resolves it to a live dimension or falls
+    back to ranking the children of the selected member."""
+
+    dimension: str = ""
+    direction: Literal["max", "min"] = "max"
+    top_n: int = 1
+
+
+@dataclass(frozen=True)
 class QueryPlan:
     report_set: str
     report: str
@@ -43,6 +57,8 @@ class QueryPlan:
     calculation: str | None = None
     # Other page/filter dropdown choices (channel, duration, geography, ...).
     filters: tuple[FilterSelection, ...] = ()
+    # Present when the question asks for a superlative/ranking answer.
+    ranking: RankingSpec | None = None
 
 
 @dataclass(frozen=True)
@@ -177,6 +193,7 @@ def plan_cache_key(plan: QueryPlan) -> tuple[object, ...]:
         plan.output_shape,
         normalize(plan.calculation or ""),
         tuple((normalize(item.role), normalize(item.value)) for item in plan.filters),
+        (plan.ranking.direction, plan.ranking.top_n) if plan.ranking else None,
     )
 
 

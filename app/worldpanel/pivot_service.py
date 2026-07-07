@@ -15,6 +15,7 @@ from app.worldpanel.pivot_models import (
     MemberSelection,
     PivotDiscovery,
     QueryPlan,
+    RankingSpec,
 )
 from app.worldpanel.planner import (
     PlanClarification,
@@ -76,6 +77,22 @@ class PivotQueryService:
             if axis not in ("row", "column"):
                 axis = "column"
             resolved_axes.append({"dimension": live, "axis": "column", "position": 0})
+
+        # Ranking ("渗透率最高的品牌") needs the ranked dimension spread on an
+        # axis too. Resolve it against the live dims; when the report has no
+        # such dimension (e.g. no Brand dim — brands live under Product), leave
+        # it unresolved and rank the children of the selected member instead.
+        ranking = _parse_ranking(tentative.get("ranking"))
+        ranking_dim_live: str | None = None
+        if ranking:
+            ranking_dim_live = _resolve_dimension_name(ranking["dimension"], dimensions)
+            if ranking_dim_live and not any(
+                _normalize(axis["dimension"]) == _normalize(ranking_dim_live)
+                for axis in resolved_axes
+            ):
+                resolved_axes.append(
+                    {"dimension": ranking_dim_live, "axis": "column", "position": 0}
+                )
         tentative["axis_placements"] = resolved_axes
 
         # A breakdown axis and a single-value filter on the SAME dimension
@@ -125,6 +142,35 @@ class PivotQueryService:
 
         member_selections = clarified_selections or resolved_selections
 
+        # Ranking over a dimension the report doesn't have (e.g. "品牌" but no
+        # Brand dim): rank the children of the selected member instead — the
+        # brands of 牙膏 are its child nodes in the Product tree. Spread that
+        # member's own dimension on a column so the children render side by side.
+        if ranking and not ranking_dim_live and member_selections:
+            host_dim = str(member_selections[0].get("dimension") or "")
+            if host_dim and not any(
+                _normalize(axis["dimension"]) == _normalize(host_dim)
+                for axis in resolved_axes
+            ):
+                resolved_axes.append({"dimension": host_dim, "axis": "column", "position": 0})
+                tentative["axis_placements"] = resolved_axes
+
+        # When an axis-spread dimension also has a specific member selected
+        # (牙膏 on Product while ranking/breaking down Product), the user wants
+        # that member's CHILDREN across the axis, not the single parent total.
+        # The trailing "*" turns the path into a scoped select-all-children.
+        axis_dim_names = {_normalize(axis["dimension"]) for axis in resolved_axes}
+        if ranking or resolved_axes:
+            for sel in member_selections:
+                path = list(sel.get("member_path") or ())
+                if (
+                    _normalize(str(sel.get("dimension") or "")) in axis_dim_names
+                    and path
+                    and path != ["*"]
+                    and path[-1] != "*"
+                ):
+                    sel["member_path"] = path + ["*"]
+
         # For a breakdown dimension placed on an axis (e.g. "by channel"), the
         # user wants every member of that dimension shown. If the planner did not
         # pin specific members for it, inject a select-all ("*") so the axis
@@ -148,6 +194,7 @@ class PivotQueryService:
             member_selections,
             report_set=report["report_set"],
             report=report["report_name"],
+            ranking=ranking,
         )
 
     async def discover(
@@ -225,12 +272,29 @@ def _schema_for(session: DataExplorerSession, driver: Any) -> SchemaService:
     return schema
 
 
+def _parse_ranking(raw: Any) -> dict[str, Any] | None:
+    """Validate the planner's ranking intent into {dimension, direction, top_n}."""
+    if not isinstance(raw, dict):
+        return None
+    direction = "min" if str(raw.get("direction") or "max").strip().lower() in ("min", "lowest", "asc", "bottom") else "max"
+    try:
+        top_n = max(1, min(50, int(raw.get("top_n") or 1)))
+    except (TypeError, ValueError):
+        top_n = 1
+    return {
+        "dimension": str(raw.get("dimension") or "").strip(),
+        "direction": direction,
+        "top_n": top_n,
+    }
+
+
 def _build_plan(
     tentative: dict[str, Any],
     member_selections: list[dict[str, Any]],
     *,
     report_set: str,
     report: str,
+    ranking: dict[str, Any] | None = None,
 ) -> QueryPlan:
     """Assemble a QueryPlan from the planner intent plus already-resolved
     (live, verified) member paths."""
@@ -265,8 +329,10 @@ def _build_plan(
         if str(value).strip()
     ) or ("Spend (RMB 000)",)
     shape = str(tentative.get("output_shape") or "single_value").strip().lower().replace(" ", "_")
-    if shape not in {"single_value", "table", "comparison", "trend"}:
+    if shape not in {"single_value", "table", "comparison", "trend", "ranking"}:
         shape = "single_value"
+    if ranking:
+        shape = "ranking"
     return QueryPlan(
         report_set=report_set,
         report=report,
@@ -277,6 +343,13 @@ def _build_plan(
         output_shape=shape,  # type: ignore[arg-type]
         calculation=canonical_calculation(str(tentative["calculation"])) if tentative.get("calculation") else None,
         filters=filters,
+        ranking=RankingSpec(
+            dimension=ranking["dimension"],
+            direction=ranking["direction"],  # type: ignore[arg-type]
+            top_n=ranking["top_n"],
+        )
+        if ranking
+        else None,
     )
 
 

@@ -158,6 +158,13 @@ def _local_tentative_plan(question: str) -> dict[str, Any]:
     # Breakdown intent ("分渠道" / "by channel"): place that dimension on a
     # column so every member is shown, mirroring the LLM planner's behaviour.
     axes += _detect_breakdown_axes(question)
+    # Superlative intent ("渗透率最高的品牌"): rank members of a dimension, so
+    # that dimension must also be spread across an axis like a breakdown.
+    ranking = _detect_ranking(question)
+    if ranking and ranking["dimension"] and not any(
+        a["dimension"] == ranking["dimension"] for a in axes
+    ):
+        axes.append({"dimension": ranking["dimension"], "axis": "column", "position": 0})
     kpis = []
     for name, aliases in (
         ("Spend (RMB 000)", ("spend", "sales value", "销售额")),
@@ -177,14 +184,52 @@ def _local_tentative_plan(question: str) -> dict[str, Any]:
         "expected_period": period,
         "calculation": calculation,
         "filters": filters,
+        "ranking": ranking,
         "output_shape": (
-            "table" if axes
+            "ranking" if ranking
+            else "table" if axes
             else "trend" if "trend" in question.casefold() or "趋势" in question
             else "single_value"
         ),
         "planner_fallback": True,
         "planner_mode": "fallback",
     }
+
+
+# Superlative phrases. The dimension words reuse the same natural names the
+# breakdown patterns emit (Channel/Geography/Product); "品牌/brand" maps to
+# Brand so the service can prefer a live Brand/Manufacturer dimension and fall
+# back to Product children when the report has none.
+_RANKING_MAX = ("最高", "最大", "最多", "哪个最", "谁最", "第一名", "highest", "largest", "biggest", "top")
+_RANKING_MIN = ("最低", "最小", "最少", "lowest", "smallest", "bottom")
+_RANKING_LIST = ("排名", "排行", "排序", "ranking", "rank")
+_RANKING_DIMENSION_WORDS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("Brand", ("品牌", "brand")),
+    ("Channel", ("渠道", "业态", "channel", "outlet")),
+    ("Geography", ("地区", "区域", "市场", "region", "city", "省份", "城市")),
+    ("Product", ("品类", "产品", "category", "product", "sku")),
+)
+
+
+def _detect_ranking(question: str) -> dict[str, Any] | None:
+    lowered = question.casefold()
+    is_min = any(word in lowered for word in _RANKING_MIN)
+    is_max = any(word in lowered for word in _RANKING_MAX)
+    is_list = any(word in lowered for word in _RANKING_LIST)
+    if not (is_min or is_max or is_list):
+        return None
+    match = re.search(r"前\s*(\d{1,2})|top\s*(\d{1,2})|前十|top\s*ten", lowered)
+    if match:
+        digits = match.group(1) or match.group(2)
+        top_n = int(digits) if digits else 10
+    else:
+        top_n = 5 if is_list and not (is_min or is_max) else 1
+    dimension = ""
+    for name, words in _RANKING_DIMENSION_WORDS:
+        if any(word in lowered for word in words):
+            dimension = name
+            break
+    return {"dimension": dimension, "direction": "min" if is_min and not is_max else "max", "top_n": top_n}
 
 
 # Phrases that mean "show this value distributed across every member of a
@@ -351,6 +396,7 @@ def _planner_prompt(question: str) -> str:
         "Schema: {\"products\": [string], \"kpis\": [string], \"expected_period\": string|null, "
         "\"calculation\": string|null, \"filters\": [{\"role\": string, \"value\": string}], "
         "\"axis_placements\": [{\"dimension\": string, \"axis\": string, \"position\": int}], "
+        "\"ranking\": {\"dimension\": string, \"direction\": \"max\"|\"min\", \"top_n\": int}|null, "
         "\"output_shape\": string}. "
         "Put product/category/brand names the user mentions into \"products\" as plain natural-language "
         "terms (translate Chinese to the English product name when you can, e.g. 榴莲->Durian, "
@@ -374,6 +420,14 @@ def _planner_prompt(question: str) -> str:
         "dimension are shown side by side, and set \"output_shape\": \"table\". Map the dimension to its "
         "natural name (渠道/channel -> Channel, 地区/region -> Geography, 品类/category/品牌/brand -> Product); "
         "the system resolves it to the live dimension. "
+        "IMPORTANT — superlative/ranking questions: when the user asks WHICH member is highest/lowest "
+        "or for a top-N ranking (最高/最低/最大/最小/最多/最少/排名/排行/前N名/哪个最/谁最, or English "
+        "'highest', 'lowest', 'top 5', 'best', 'which brand has the most'), additionally emit "
+        "\"ranking\": {\"dimension\": <dimension being ranked, e.g. Brand/Product/Channel>, "
+        "\"direction\": \"max\"|\"min\", \"top_n\": int} and set \"output_shape\": \"ranking\". "
+        "Also emit the axis_placement for that dimension as above, and put the scoping category "
+        "(e.g. 牙膏 in '牙膏渗透率最高的品牌') into \"products\" so the system restricts the ranking "
+        "to that category's members. "
         "Do not invent member paths.\nQuestion: "
         + question
     )

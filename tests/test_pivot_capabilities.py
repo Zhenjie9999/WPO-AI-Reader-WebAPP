@@ -489,3 +489,76 @@ def test_channel_breakdown_answer_lists_every_channel_for_the_period():
     assert "CVS 33" in answer
     assert "Ecommerce 44.4" in answer
     assert "15-May-26" in answer
+
+
+def test_local_planner_detects_ranking_intent_for_superlatives():
+    from app.worldpanel.planner import _local_tentative_plan
+
+    plan = _local_tentative_plan("牙膏里渗透率最高的品牌是哪个？")
+    assert plan["ranking"] == {"dimension": "Brand", "direction": "max", "top_n": 1}
+    assert plan["output_shape"] == "ranking"
+    # The ranked dimension is spread across a column axis like a breakdown.
+    assert {"dimension": "Brand", "axis": "column", "position": 0} in plan["axis_placements"]
+    assert "Penetration %" in plan["kpis"]
+
+    low = _local_tentative_plan("销售额最低的前3个渠道是哪些？")
+    assert low["ranking"]["direction"] == "min"
+    assert low["ranking"]["top_n"] == 3
+    assert low["ranking"]["dimension"] == "Channel"
+
+    top_en = _local_tentative_plan("Top 5 brands by spend in May 2026")
+    assert top_en["ranking"]["top_n"] == 5
+
+    none = _local_tentative_plan("Blueberry在2026年5月的销售额是多少？")
+    assert none["ranking"] is None
+
+
+def test_ranking_answer_orders_members_and_excludes_scope_parent():
+    # Dates on rows, brands on columns; the scope parent 牙膏 also rendered.
+    table = table_from_grid(
+        ["牙膏", "BrandA", "BrandB", "BrandC", "BrandD"],
+        [
+            ["16-May-25", ["90", "10", "20", "30", "5"]],
+            ["15-May-26", ["95.5", "12.3", "45.6", "33.3", "7.7"]],
+        ],
+        metric="Penetration %",
+    )
+    answer = answer_from_pivot_tables(
+        {"Penetration %": table},
+        ["牙膏"],
+        "15-May-26",
+        ranking={"direction": "max", "top_n": 1},
+    )
+    # The parent 牙膏 (95.5, highest raw value) must NOT win the ranking.
+    assert "最高的是 BrandB" in answer
+    assert "45.6%" in answer
+    assert "15-May-26" in answer
+    # Full ordering listed for transparency.
+    assert answer.index("BrandB") < answer.index("BrandC") < answer.index("BrandA")
+
+    lowest = answer_from_pivot_tables(
+        {"Penetration %": table},
+        ["牙膏"],
+        "15-May-26",
+        ranking={"direction": "min", "top_n": 2},
+    )
+    assert "最低的是 BrandD" in lowest
+
+
+def test_query_plan_payload_roundtrip_preserves_ranking():
+    from dataclasses import asdict
+    from app.main import _query_plan_from_payload
+    from app.worldpanel.pivot_models import QueryPlan, RankingSpec
+
+    plan = QueryPlan(
+        report_set="S",
+        report="R",
+        output_shape="ranking",
+        ranking=RankingSpec(dimension="Brand", direction="max", top_n=3),
+    )
+    rebuilt = _query_plan_from_payload(asdict(plan))
+    assert rebuilt.ranking == RankingSpec(dimension="Brand", direction="max", top_n=3)
+    assert rebuilt.output_shape == "ranking"
+
+    no_ranking = _query_plan_from_payload({"report_set": "S", "report": "R"})
+    assert no_ranking.ranking is None

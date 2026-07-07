@@ -252,11 +252,14 @@ def answer_from_pivot_tables(
     tables: dict[str, PivotResultTable],
     member_leaves: list[str],
     period_label: str | None,
+    ranking: dict[str, object] | None = None,
 ) -> str:
     """Build an answer for a pivot result whose shape may be any cross-tab.
 
     `member_leaves` are leaf labels of the requested member selections; the
     period label is the resolved actual date label, when one was requested.
+    `ranking` ({"direction": "max"|"min", "top_n": int}) answers superlative
+    questions by ordering the non-date axis at the resolved period.
     """
     if not tables:
         raise PivotResultError("No pivot tables were parsed")
@@ -265,6 +268,11 @@ def answer_from_pivot_tables(
         terms = [leaf for leaf in member_leaves if _label_in_table(leaf, table)]
         period = period_label or (table.dates[-1] if table.dates else None)
         fmt = _formatter_for(metric)
+        if ranking and period:
+            line = _ranking_answer(metric, table, member_leaves, period, fmt, ranking)
+            if line:
+                lines.append(line)
+                continue
         if terms and period:
             # Report every requested member (e.g. "Fruit and 4 Premium Fruits").
             parts = []
@@ -295,6 +303,53 @@ def answer_from_pivot_tables(
             preview = "、".join(table.row_labels[:8])
             lines.append(f"{metric}：表格已刷新（{len(table.row_labels)} 行：{preview}…）")
     return "\n".join(lines)
+
+
+def _ranking_answer(
+    metric: str,
+    table: PivotResultTable,
+    member_leaves: list[str],
+    period: str,
+    fmt,
+    ranking: dict[str, object],
+) -> str | None:
+    """Order the non-date axis at `period` and report the top/bottom members.
+
+    Scope terms (e.g. the 牙膏 parent whose children are being ranked) and the
+    bulk-select sentinel "*" are excluded from the ranked candidates."""
+    row = _match_label(period, table.row_labels)
+    if row is not None:
+        cells = table.cells.get(row, {})
+        entries = [(label, cells[label]) for label in table.column_labels if label in cells]
+    else:
+        column = _match_label(period, table.column_labels)
+        if column is None:
+            return None
+        entries = [
+            (label, table.cells[label][column])
+            for label in table.row_labels
+            if column in table.cells.get(label, {})
+        ]
+    excluded = {_normalize(term) for term in member_leaves if term} | {_normalize("*")}
+    entries = [(label, value) for label, value in entries if _normalize(label) not in excluded]
+    if not entries:
+        return None
+    direction = str(ranking.get("direction") or "max")
+    try:
+        top_n = max(1, min(50, int(ranking.get("top_n") or 1)))  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        top_n = 1
+    ordered = sorted(entries, key=lambda item: item[1], reverse=(direction != "min"))
+    word = "最低" if direction == "min" else "最高"
+    top_label, top_value = ordered[0]
+    listed = ordered[: max(top_n, min(10, len(ordered)))]
+    ranking_text = "；".join(
+        f"{index + 1}. {label} {fmt(value)}" for index, (label, value) in enumerate(listed)
+    )
+    return (
+        f"{metric}：{word}的是 {top_label}（{fmt(top_value)}，{period}）。"
+        f"排名（共 {len(ordered)} 个成员）：{ranking_text}"
+    )
 
 
 def format_number(value: float) -> str:

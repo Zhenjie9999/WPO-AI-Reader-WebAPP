@@ -29,7 +29,7 @@ from app.worldpanel.data_explorer import (
 )
 from app.worldpanel.multitable import MultiKpiTable
 from app.worldpanel.parser import KeyMeasuresTable, parse_key_measures_text
-from app.worldpanel.pivot_models import AxisPlacement, FilterSelection, MemberSelection, QueryPlan
+from app.worldpanel.pivot_models import AxisPlacement, FilterSelection, MemberSelection, QueryPlan, RankingSpec
 from app.worldpanel.pivot_cache import VerifiedResult, VerifiedResultCache
 from app.worldpanel.pivot_result import PivotResultError, answer_from_pivot_tables, format_plain
 from app.worldpanel.pivot_service import PivotQueryService
@@ -660,14 +660,21 @@ async def pivot_execute(request: PivotExecuteRequest) -> dict[str, object]:
         # for every KPI (Penetration %, Average Price, Frequency, growth %, ...).
         # The legacy KeyMeasures answerer rounds to int and cannot format
         # percentages, so it is not used for pivot answers.
+        # For a scoped bulk select ("牙膏" > "*") the meaningful leaf is the
+        # parent category, so ranking answers can exclude it from candidates.
         member_leaves = [
-            selection.member_path[-1]
+            selection.member_path[-2]
+            if selection.member_path[-1] == "*" and len(selection.member_path) > 1
+            else selection.member_path[-1]
             for selection in plan.member_selections
-            if selection.checked and selection.member_path
+            if selection.checked and selection.member_path and selection.member_path != ("*",)
         ]
         try:
             response["answer"] = answer_from_pivot_tables(
-                result.tables, member_leaves, result.receipt.period
+                result.tables,
+                member_leaves,
+                result.receipt.period,
+                ranking=asdict(plan.ranking) if plan.ranking else None,
             )
         except PivotResultError as exc:
             response["answer_error"] = str(exc)
@@ -1053,6 +1060,13 @@ def _query_plan_from_payload(payload: dict[str, object]) -> QueryPlan:
             for item in payload.get("filters", [])  # type: ignore[union-attr]
             if isinstance(item, dict) and item.get("role") and item.get("value")
         ),
+        ranking=RankingSpec(
+            dimension=str(payload["ranking"].get("dimension") or ""),  # type: ignore[union-attr]
+            direction="min" if str(payload["ranking"].get("direction")) == "min" else "max",  # type: ignore[union-attr]
+            top_n=max(1, min(50, int(payload["ranking"].get("top_n") or 1))),  # type: ignore[union-attr]
+        )
+        if isinstance(payload.get("ranking"), dict)
+        else None,
     )
 
 

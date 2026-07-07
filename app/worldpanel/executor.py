@@ -69,15 +69,22 @@ class QueryExecutor:
                 await self.driver.select_all_members(tag)
                 await self.driver.apply_member_selection()
                 continue
-            candidates = await self.schema.all_members(plan.report, tag)
-            for selection in selections:
-                matches = [node for node in candidates if node.path == selection.member_path]
-                if not matches:
-                    raise WorldpanelError(f"Could not resolve member path: {selection.member_path}")
-                # Some Pivot trees contain multiple distinct roots with the same
-                # label (e.g. two "Fruit" roots -> identical path). Selecting the
-                # first occurrence is deterministic and far better than failing.
-                await self.driver.check_member(tag, matches[0], selection.checked)
+            # A trailing "*" scopes the select-all to one member's children
+            # (e.g. ("牙膏", "*") -> every brand under 牙膏).
+            scoped = [s for s in selections if len(s.member_path) > 1 and s.member_path[-1] == "*"]
+            exact = [s for s in selections if not (len(s.member_path) > 1 and s.member_path[-1] == "*")]
+            for selection in scoped:
+                await self.driver.select_children(tag, selection.member_path[:-1])
+            if exact:
+                candidates = await self.schema.all_members(plan.report, tag)
+                for selection in exact:
+                    matches = [node for node in candidates if node.path == selection.member_path]
+                    if not matches:
+                        raise WorldpanelError(f"Could not resolve member path: {selection.member_path}")
+                    # Some Pivot trees contain multiple distinct roots with the same
+                    # label (e.g. two "Fruit" roots -> identical path). Selecting the
+                    # first occurrence is deterministic and far better than failing.
+                    await self.driver.check_member(tag, matches[0], selection.checked)
             await self.driver.apply_member_selection()
 
         await self.driver.apply()
@@ -186,8 +193,8 @@ def _verify_applied_state(plan: QueryPlan, state: AppliedPivotState) -> None:
         for dimension, paths in state.selected_members.items()
     }
     for selection in plan.member_selections:
-        if selection.member_path == ("*",):
-            continue  # "all members" — not verified per-path
+        if selection.member_path and selection.member_path[-1] == "*":
+            continue  # bulk select (whole dimension or children) — not verified per-path
         actual = actual_by_dimension.get(normalize(selection.dimension), set())
         requested = tuple(normalize(part) for part in selection.member_path)
         present = requested in actual
@@ -209,8 +216,8 @@ def _verify_rendered_members(
         for label in (*table.row_labels, *table.column_labels)
     }
     for selection in plan.member_selections:
-        if selection.member_path == ("*",):
-            continue  # "all members" — every member rendered, nothing to pin
+        if selection.member_path and selection.member_path[-1] == "*":
+            continue  # bulk select — the rendered set is open-ended, nothing to pin
         if not selection.checked or normalize(selection.dimension) not in rendered_dimensions:
             continue
         leaf = normalize(selection.member_path[-1])

@@ -389,6 +389,52 @@ class PivotDriver:
             raise WorldpanelError(f"Could not select all members: {tag.label}")
         self.actions.append(f"select_all:{tag.label}")
 
+    async def select_children(self, tag: DimensionTag, path: tuple[str, ...]) -> None:
+        """Select every immediate child of the member at `path` in one shot
+        (e.g. all brands under a category). Falls back to selecting the member
+        itself when it has no children."""
+        await self._ensure_selector(tag)
+        selector = self._require_selector()
+        await self._wait_for_members_tree(selector)
+        selected = 0
+        for _ in range(3):
+            selected = await selector.evaluate(
+                """
+                ({path}) => {
+                  const tree = window.membersTree || $find('ctl00_cphMain_trvSimpleSelector');
+                  if (!tree) return 0;
+                  const nodePath = node => {
+                    const parts = [];
+                    for (let current = node; current; current = current.get_parent()) {
+                      if (typeof current.get_text === 'function') parts.unshift(current.get_text().trim());
+                    }
+                    return parts;
+                  };
+                  const target = tree.get_allNodes().find(
+                    item => JSON.stringify(nodePath(item)) === JSON.stringify(path)
+                  );
+                  if (!target) return 0;
+                  const children = [];
+                  const kids = target.get_nodes ? target.get_nodes() : null;
+                  for (let index = 0; kids && index < kids.get_count(); index++) {
+                    children.push(kids.getNode(index));
+                  }
+                  const picks = children.length ? children : [target];
+                  picks.forEach(node => node.select());
+                  return tree.get_selectedNodes().length;
+                }
+                """,
+                {"path": list(path)},
+            )
+            if selected:
+                break
+            await asyncio.sleep(0.2)
+        if not selected:
+            raise WorldpanelError(
+                f"Could not select children of member: {' > '.join(path)}"
+            )
+        self.actions.append(f"select_children:{tag.label}:{' > '.join(path)}")
+
     async def apply_member_selection(self) -> None:
         selector = self._require_selector()
         try:

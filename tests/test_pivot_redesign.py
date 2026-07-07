@@ -211,6 +211,9 @@ class _HonestDriver:
         assert member.path == self.gold.path
         self.actions.append("check")
 
+    async def select_children(self, tag, path):
+        self.actions.append(f"select_children:{' > '.join(path)}")
+
     async def clear_member_selection(self, tag):
         self.actions.append(f"clear:{tag.label}")
 
@@ -629,3 +632,35 @@ async def test_executor_rejects_unparseable_refreshed_table_and_never_returns_re
 
     with pytest.raises(Exception, match="could not be parsed"):
         await QueryExecutor(Driver(), object()).execute(plan)  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_executor_scoped_star_selects_children_without_path_resolution():
+    """("Fruit", "Kiwifruit", "*") must bulk-select the children of Kiwifruit
+    via the driver, never resolve the literal "*" against the member tree."""
+    product = next(tag for tag in parse_dimension_tags(PIVOT_HTML) if tag.label == "Product")
+    gold = next(node for node in parse_member_tree(TREE_HTML) if node.path == ("Fruit", "Kiwifruit", "Gold"))
+    driver = _HonestDriver(gold, product, page_selected={"Product": ()})
+
+    class Schema:
+        calls = 0
+
+        async def all_members(self, report, tag):
+            Schema.calls += 1
+            return (gold,)
+
+    plan = QueryPlan(
+        report_set="Set",
+        report="Report",
+        member_selections=(MemberSelection("Product", ("Fruit", "Kiwifruit", "*")),),
+        kpis=("Spend (RMB 000)",),
+    )
+    result = await QueryExecutor(driver, Schema()).execute(plan)  # type: ignore[arg-type]
+
+    assert "select_children:Fruit > Kiwifruit" in driver.actions
+    assert "member-apply" in driver.actions
+    # No per-path resolution happened for the scoped sentinel.
+    assert Schema.calls == 0
+    # Verification passed even though the page reports no pinned member —
+    # a bulk children-select is open-ended by design.
+    assert result.receipt.verified is True
