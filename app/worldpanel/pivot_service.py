@@ -20,6 +20,7 @@ from app.worldpanel.planner import (
     PlanClarification,
     StructuredPlanner,
     _extract_json,
+    calculation_clarification_for_question,
     canonical_calculation,
     canonical_kpi,
 )
@@ -54,6 +55,10 @@ class PivotQueryService:
         tentative = await StructuredPlanner(assistant).tentative_plan(question)
         if clarification:
             _apply_clarification(tentative, clarification)
+        else:
+            calculation_clarification = calculation_clarification_for_question(question)
+            if calculation_clarification:
+                return calculation_clarification
         dimensions = await schema.dimensions()
 
         # Resolve axis-placement dimension names to live dimensions (the LLM may
@@ -279,6 +284,10 @@ def _apply_clarification(tentative: dict[str, Any], clarification: dict[str, Any
     dimension = str(clarification.get("dimension") or "")
     member_path = [str(part) for part in clarification.get("member_path", [])]
     if not dimension or not member_path:
+        return
+    if dimension.casefold() == "calculation":
+        tentative["calculation"] = member_path[-1]
+        tentative.pop("planner_fallback", None)
         return
     selections = [
         selection

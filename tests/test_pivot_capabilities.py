@@ -11,6 +11,7 @@ from app.worldpanel.pivot_result import (
     table_from_grid,
 )
 from app.worldpanel.planner import (
+    calculation_clarification_for_question,
     _detect_calculation,
     _detect_duration,
     _detect_filters,
@@ -83,6 +84,23 @@ def test_planner_detects_growth_period_and_filters_from_natural_language():
     filters = _detect_filters(question)
     roles = {f["role"]: f["value"] for f in filters}
     assert roles == {"channel": "Hypermarket", "duration": "52 w/e"}
+
+
+def test_ambiguous_growth_rate_requests_calculation_clarification():
+    clarification = calculation_clarification_for_question("Show 2026 May spend growth rate")
+
+    assert clarification is not None
+    assert clarification.dimension == "calculation"
+    assert ("Yr on Yr % Change",) in clarification.candidates
+    assert ("Period on Period % Change~",) in clarification.candidates
+    assert _detect_calculation("Show 2026 May spend growth rate") is None
+
+
+def test_explicit_growth_basis_does_not_request_calculation_clarification():
+    assert calculation_clarification_for_question("Show 2026 May spend growth rate vs last year") is None
+    assert calculation_clarification_for_question("Show 2026 May spend period on period growth") is None
+    assert _detect_calculation("Show 2026 May spend growth rate vs last year") == "Yr on Yr % Change"
+    assert _detect_calculation("Show 2026 May spend period on period growth") == "Period on Period % Change~"
 
 
 def test_duration_std_and_ytd_are_distinct_and_never_conflated():

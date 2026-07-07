@@ -402,6 +402,61 @@ def test_user_clarification_replaces_ambiguous_selection_and_skips_full_rescan()
     assert "planner_fallback" not in tentative
 
 
+def test_calculation_clarification_sets_growth_basis_not_member_selection():
+    tentative = {
+        "member_selections": [],
+        "calculation": None,
+        "planner_fallback": True,
+    }
+
+    _apply_clarification(
+        tentative,
+        {"dimension": "calculation", "member_path": ["Period on Period % Change~"]},
+    )
+
+    assert tentative["calculation"] == "Period on Period % Change~"
+    assert tentative["member_selections"] == []
+    assert "planner_fallback" not in tentative
+
+
+@pytest.mark.asyncio
+async def test_pivot_plan_requests_growth_basis_before_member_resolution(monkeypatch):
+    from app.config import get_settings
+    from app.worldpanel.client import Credentials
+    from app.worldpanel.pivot_service import PivotQueryService
+
+    opened = {"pivot": False}
+
+    class Driver:
+        async def open_pivot(self):
+            opened["pivot"] = True
+
+    async def fake_open_persistent_data_explorer(*args, **kwargs):
+        return Driver()
+
+    monkeypatch.setattr(
+        "app.worldpanel.pivot_service.open_persistent_data_explorer",
+        fake_open_persistent_data_explorer,
+    )
+
+    session = DataExplorerSession("clarify-growth")
+    session.current_report = {
+        "report_set": "Set",
+        "report_parameter": "Parameter",
+        "report_name": "Data Explorer",
+    }
+
+    result = await PivotQueryService(get_settings()).plan(
+        session,
+        Credentials("user@example.com", "password"),
+        "Show 2026 May spend growth rate",
+    )
+
+    assert opened["pivot"] is True
+    assert isinstance(result, PlanClarification)
+    assert result.dimension == "calculation"
+
+
 def test_fallback_planner_never_silently_defaults_a_member_request():
     assert _question_may_require_members("Product on Row, show Gold kiwifruit Spend") is True
     assert _question_may_require_members("Product on Row, Period on Column, show Spend") is False

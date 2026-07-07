@@ -27,6 +27,41 @@ class PlanClarification:
     candidates: tuple[tuple[str, ...], ...]
 
 
+_YOY_PERCENT = "Yr on Yr % Change"
+_POP_PERCENT = "Period on Period % Change~"
+
+
+def calculation_clarification_for_question(question: str) -> PlanClarification | None:
+    if not _has_ambiguous_growth_intent(question):
+        return None
+    return PlanClarification(
+        dimension="calculation",
+        question=(
+            "你提到增长率，但还需要确认比较口径：请选择同比（与去年同期相比）"
+            "还是环比（与上一周期相比）。\n"
+            "Which growth-rate basis should I use: year-on-year or period-on-period?"
+        ),
+        candidates=((_YOY_PERCENT,), (_POP_PERCENT,)),
+    )
+
+
+def _has_ambiguous_growth_intent(question: str) -> bool:
+    if _detect_calculation(question):
+        return False
+    lowered = question.casefold()
+    ambiguous_tokens = (
+        "growth rate",
+        "change rate",
+        "% change",
+        "rate of growth",
+        "增长率",
+        "增长",
+        "增幅",
+        "变化率",
+    )
+    return any(token in lowered for token in ambiguous_tokens)
+
+
 def compile_query_plan(
     payload: dict[str, Any],
     *,
@@ -230,14 +265,42 @@ def canonical_calculation(term: str | None) -> str | None:
 
 def _detect_calculation(question: str) -> str | None:
     lowered = question.casefold()
-    if any(token in lowered for token in ("yr on yr %", "yoy %", "同比增长", "增长率", "growth rate", "% change", "yoy growth")):
-        return "Yr on Yr % Change"
-    if any(token in lowered for token in ("yr on yr difference", "同比差异", "yoy difference")):
+    if any(token in lowered for token in ("yr on yr difference", "\u540c\u6bd4\u5dee\u5f02", "yoy difference")):
         return "Yr on Yr Difference"
-    if any(token in lowered for token in ("period on period %", "环比增长", "环比")):
+    if any(
+        token in lowered
+        for token in (
+            "period on period %",
+            "period on period growth",
+            "period-on-period",
+            "pop growth",
+            "month on month",
+            "mom growth",
+            "vs previous period",
+            "\u73af\u6bd4\u589e\u957f",
+            "\u73af\u6bd4",
+        )
+    ):
         return "Period on Period % Change~"
-    if any(token in lowered for token in ("同比", "year on year", "yr on yr", "yoy", "vs last year", "vs ly", "去年同期")):
-        # Default same-period-last-year intent to the percentage growth view.
+    if any(
+        token in lowered
+        for token in (
+            "yr on yr %",
+            "yoy %",
+            "year on year growth",
+            "yr on yr growth",
+            "yoy growth",
+            "year-on-year",
+            "year on year",
+            "yr on yr",
+            "yoy",
+            "vs last year",
+            "vs ly",
+            "\u540c\u6bd4\u589e\u957f",
+            "\u540c\u6bd4",
+            "\u53bb\u5e74\u540c\u671f",
+        )
+    ):
         return "Yr on Yr % Change"
     return None
 
@@ -293,7 +356,12 @@ def _planner_prompt(question: str) -> str:
         "terms (translate Chinese to the English product name when you can, e.g. 榴莲->Durian, "
         "车厘子->Cherry, 金果->Gold kiwifruit); do NOT guess exact hierarchy paths — the system resolves "
         "them against the live member tree. "
-        "Use \"calculation\": \"Yr on Yr % Change\" for growth-rate / 同比增长 / vs last year questions. "
+        "Use \"calculation\": \"Yr on Yr % Change\" only when the user explicitly asks for "
+        "同比 / year-on-year / YoY / vs last year / 去年同期. "
+        "Use \"calculation\": \"Period on Period % Change~\" only when the user explicitly asks for "
+        "环比 / period-on-period / month-on-month / vs previous period. "
+        "If the user only says growth rate / 增长率 / % change without the comparison basis, "
+        "leave \"calculation\" null so the app can ask a clarification question. "
         "Use \"filters\": [{\"role\": \"channel|duration|geography\", \"value\": \"...\"}] only to pin "
         "ONE specific value the user named (e.g. 'in CVS' -> channel=CVS, '华东地区' -> geography=华东). "
         "The duration value must be exactly one of STD, 52 w/e, 12 w/e, 4 w/e, or YTD — these are "
