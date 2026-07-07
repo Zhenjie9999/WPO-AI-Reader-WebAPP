@@ -421,6 +421,8 @@ def _term_match(label: str, term: str, normalized_question: str) -> int:
     term_tokens = _tokens(term)
     if normalized_term == normalized_label or term_tokens == label_tokens or any(a == normalized_term for a in aliases):
         return _EXACT + len(normalized_label)  # exact (plural/space-insensitive) or alias-equals-term
+    if _is_total_member_for_term(label_tokens, term_tokens):
+        return _STRONG * 2 + len(term_tokens)
     if term_tokens and term_tokens <= label_tokens:
         return _STRONG + len(term_tokens)  # every term word in a more specific label
     if label_tokens <= term_tokens and len(label_tokens) >= 2:
@@ -430,6 +432,10 @@ def _term_match(label: str, term: str, normalized_question: str) -> int:
     if any(a and a in normalized_term for a in aliases):
         return len(normalized_term)
     return 0
+
+
+def _is_total_member_for_term(label_tokens: set[str], term_tokens: set[str]) -> bool:
+    return bool(term_tokens) and "total" in label_tokens and label_tokens - {"total"} == term_tokens
 
 
 def _alias_seed_terms(normalized_question: str) -> list[str]:

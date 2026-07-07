@@ -284,11 +284,48 @@ async def _discover(question, extra_terms):
     )
 
 
+@pytest.mark.asyncio
+async def test_crest_resolves_to_total_crest_when_tm_variant_is_present():
+    import app.worldpanel.pivot_service as svc
+    from app.worldpanel.pivot_models import DimensionTag
+
+    tag = DimensionTag(label="Product", dimension_id="[Dim1]", axis="column", position=0)
+    nodes = (
+        _make_node("Total CREST", ["Total CREST"]),
+        _make_node("CREST TM", ["CREST TM"]),
+    )
+
+    class _Schema:
+        async def all_members(self, report, t):
+            return nodes
+
+    class _Driver:
+        async def cancel_member_selection(self):
+            pass
+
+    result = await svc._discover_members_from_question(
+        "CREST 2026 sales value",
+        "R",
+        (tag,),
+        _Schema(),
+        _Driver(),
+        extra_terms=("CREST",),
+    )
+
+    assert result == [{"dimension": "Product", "member_path": ["Total CREST"], "checked": True}]
+
+
 def test_term_match_prefers_specific_node_over_generic_root():
     from app.worldpanel.pivot_service import _term_match
 
     assert _term_match("4 Premium Fruit Types", "4 Premium Fruits", "") > _term_match("Fruit", "4 Premium Fruits", "")
     assert _term_match("Fruit", "4 Premium Fruits", "") == 0
+
+
+def test_total_brand_member_beats_tm_variant_for_base_brand_term():
+    from app.worldpanel.pivot_service import _term_match
+
+    assert _term_match("Total CREST", "CREST", "") > _term_match("CREST TM", "CREST", "")
 
 
 @pytest.mark.asyncio
