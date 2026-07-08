@@ -67,6 +67,76 @@ class DataStore:
             self._connection.commit()
         return len(payload)
 
+    def catalog(self, account: str, member_cap: int = 300) -> dict[str, object]:
+        """What this account's local data can answer: the distinct metrics,
+        members, and date labels on record, plus freshness. Used to let the
+        LLM decide whether a question is answerable without the browser."""
+        with self._lock:
+            metrics = [
+                row[0]
+                for row in self._connection.execute(
+                    "SELECT DISTINCT metric FROM facts WHERE account = ? ORDER BY metric",
+                    (account,),
+                )
+            ]
+            members = [
+                row[0]
+                for row in self._connection.execute(
+                    "SELECT DISTINCT member FROM facts WHERE account = ? ORDER BY member"
+                    " LIMIT ?",
+                    (account, member_cap + 1),
+                )
+            ]
+            dates = [
+                row[0]
+                for row in self._connection.execute(
+                    "SELECT DISTINCT date FROM facts WHERE account = ?",
+                    (account,),
+                )
+            ]
+            updated = self._connection.execute(
+                "SELECT MAX(recorded_at) FROM facts WHERE account = ?",
+                (account,),
+            ).fetchone()[0]
+        truncated = len(members) > member_cap
+        return {
+            "metrics": metrics,
+            "members": members[:member_cap],
+            "members_truncated": truncated,
+            "dates": dates,
+            "updated_at": updated,
+        }
+
+    def fetch_cells(
+        self,
+        account: str,
+        metric: str,
+        members: list[str],
+        dates: list[str],
+    ) -> dict[tuple[str, str], float] | None:
+        """Return {(member, date): value} for the requested grid.
+
+        Returns None when the same cell exists under different reports with
+        conflicting values — that ambiguity must fall back to a live pull."""
+        if not members or not dates:
+            return None
+        member_marks = ",".join("?" for _ in members)
+        date_marks = ",".join("?" for _ in dates)
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT member, date, value FROM facts"
+                f" WHERE account = ? AND metric = ? AND member IN ({member_marks})"
+                f" AND date IN ({date_marks})",
+                (account, metric, *members, *dates),
+            ).fetchall()
+        cells: dict[tuple[str, str], float] = {}
+        for member, date, value in rows:
+            key = (member, date)
+            if key in cells and cells[key] != value:
+                return None
+            cells[key] = value
+        return cells
+
     def export_rows(self, account: str) -> list[tuple[str, str, str, str, str, float]]:
         """Every (report_set, report, metric, member, date, value) this
         account has ever pulled, for whole-history CSV export."""

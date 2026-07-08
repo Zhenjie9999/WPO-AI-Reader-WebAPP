@@ -666,3 +666,124 @@ async def test_export_csv_merges_datastore_with_in_memory_rows(tmp_path, monkeyp
     finally:
         main._sessions.clear()
         store.close()
+
+
+def test_datastore_catalog_and_fetch_cells(tmp_path):
+    from app.worldpanel.datastore import DataStore
+
+    store = DataStore(str(tmp_path / "facts.sqlite3"))
+    store.record("a@x.com", "S", "R", "Penetration %", [
+        ("BrandA", "15-May-26", 12.3),
+        ("BrandB", "15-May-26", 45.6),
+        ("BrandA", "17-Apr-26", 11.0),
+    ])
+    catalog = store.catalog("a@x.com")
+    assert catalog["metrics"] == ["Penetration %"]
+    assert set(catalog["members"]) == {"BrandA", "BrandB"}
+    assert set(catalog["dates"]) == {"15-May-26", "17-Apr-26"}
+    assert catalog["members_truncated"] is False
+    assert catalog["updated_at"]
+
+    cells = store.fetch_cells("a@x.com", "Penetration %", ["BrandA", "BrandB"], ["15-May-26"])
+    assert cells == {("BrandA", "15-May-26"): 12.3, ("BrandB", "15-May-26"): 45.6}
+    # Conflicting values for the same cell under two reports -> ambiguous -> None.
+    store.record("a@x.com", "S", "R2", "Penetration %", [("BrandA", "15-May-26", 99.0)])
+    assert store.fetch_cells("a@x.com", "Penetration %", ["BrandA"], ["15-May-26"]) is None
+    store.close()
+
+
+class _LocalAI:
+    def __init__(self, payload):
+        self.payload = payload
+
+    async def chat(self, prompt):
+        import json as _json
+        return _json.dumps(self.payload)
+
+
+@pytest.mark.asyncio
+async def test_local_answer_answers_ranking_from_store(tmp_path):
+    from app.worldpanel.datastore import DataStore
+    from app.worldpanel.local_answer import try_local_answer
+
+    store = DataStore(str(tmp_path / "facts.sqlite3"))
+    store.record("a@x.com", "S", "R", "Penetration %", [
+        ("BrandA", "15-May-26", 12.3),
+        ("BrandB", "15-May-26", 45.6),
+        ("BrandC", "15-May-26", 33.3),
+    ])
+    ai = _LocalAI({
+        "answerable": True,
+        "metric": "Penetration %",
+        "members": ["BrandA", "BrandB", "BrandC"],
+        "dates": ["15-May-26"],
+        "ranking": {"direction": "max", "top_n": 1},
+    })
+    result = await try_local_answer("刚才那些品牌里渗透率最高的是哪个？", "a@x.com", store, ai)
+    assert result is not None
+    assert "最高的是 BrandB" in result["answer"]
+    assert result["source"]["kind"] == "local-store"
+    store.close()
+
+
+@pytest.mark.asyncio
+async def test_local_answer_guards_fall_back_to_live_pull(tmp_path):
+    from app.worldpanel.datastore import DataStore
+    from app.worldpanel.local_answer import try_local_answer
+
+    store = DataStore(str(tmp_path / "facts.sqlite3"))
+    store.record("a@x.com", "S", "R", "Spend (RMB 000)", [("BrandA", "15-May-26", 10.0)])
+
+    good_spec = {
+        "answerable": True,
+        "metric": "Spend (RMB 000)",
+        "members": ["BrandA"],
+        "dates": ["15-May-26"],
+        "ranking": None,
+    }
+    # 1) Explicit fresh-pull wording always bypasses the local store.
+    assert await try_local_answer("重新拉取 BrandA 5月销售额", "a@x.com", store, _LocalAI(good_spec)) is None
+    # 2) LLM says not answerable.
+    assert await try_local_answer("q", "a@x.com", store, _LocalAI({"answerable": False})) is None
+    # 3) Invented member not in the catalog.
+    bad_member = dict(good_spec, members=["BrandZ"])
+    assert await try_local_answer("q", "a@x.com", store, _LocalAI(bad_member)) is None
+    # 4) Missing cell (known member, but a date it was never pulled for).
+    store.record("a@x.com", "S", "R", "Spend (RMB 000)", [("BrandB", "17-Apr-26", 5.0)])
+    partial = dict(good_spec, members=["BrandA", "BrandB"], dates=["15-May-26"])
+    assert await try_local_answer("q", "a@x.com", store, _LocalAI(partial)) is None
+    # 5) LLM itself failing is contained.
+    class _Boom:
+        async def chat(self, prompt):
+            raise RuntimeError("ark down")
+    assert await try_local_answer("q", "a@x.com", store, _Boom()) is None
+    # 6) No assistant configured.
+    assert await try_local_answer("q", "a@x.com", store, None) is None
+    # Control: the good spec on complete data does answer.
+    ok = await try_local_answer("BrandA 5月销售额", "a@x.com", store, _LocalAI(good_spec))
+    assert ok is not None and "BrandA" in ok["answer"]
+    store.close()
+
+
+@pytest.mark.asyncio
+async def test_local_answer_orders_dates_chronologically(tmp_path):
+    from app.worldpanel.datastore import DataStore
+    from app.worldpanel.local_answer import try_local_answer
+
+    store = DataStore(str(tmp_path / "facts.sqlite3"))
+    store.record("a@x.com", "S", "R", "Spend (RMB 000)", [
+        ("BrandA", "15-May-26", 20.0),
+        ("BrandA", "17-Apr-26", 10.0),
+    ])
+    ai = _LocalAI({
+        "answerable": True,
+        "metric": "Spend (RMB 000)",
+        # Deliberately reversed: the store must sort chronologically.
+        "members": ["BrandA"],
+        "dates": ["15-May-26", "17-Apr-26"],
+        "ranking": None,
+    })
+    result = await try_local_answer("BrandA 4月和5月的销售额", "a@x.com", store, ai)
+    assert result is not None
+    assert result["source"]["dates"] == ["17-Apr-26", "15-May-26"]
+    store.close()

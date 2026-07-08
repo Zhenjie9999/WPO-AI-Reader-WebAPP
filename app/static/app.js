@@ -607,6 +607,19 @@ async function submitPivotAsk(question, clarification = null) {
     addPivotClarification(question, planned.clarification);
     return true;
   }
+  if (planned.local && planned.answer) {
+    // Answered from the local data store in seconds — no browser pull.
+    const updatedAt = planned.source && planned.source.updated_at ? planned.source.updated_at : "";
+    const note = `⚡ 来自本地数据仓（此前拉取的数据${updatedAt ? `，落库于 ${updatedAt}` : ""}）。如需重新从 WPO 拉取最新数据，请在问题中加“重新拉取”。`;
+    const text = `${planned.answer}\n\n${note}`;
+    addMessage("assistant", text);
+    rememberAnswer(text);
+    finishProgress("done", "Answered from local store / 本地数据仓秒答");
+    downloadCsvButton.disabled = false;
+    pendingQuestion = null;
+    pendingClarification = null;
+    return true;
+  }
   startProgress("Execute Pivot query / 执行 Pivot 查询", [
     { status: "running", message: "Applying Pivot layout and member selections / 应用 Pivot 布局和成员选择" },
     { status: "running", message: "Reading KPI table from rendered report / 读取渲染后的 KPI 表" },

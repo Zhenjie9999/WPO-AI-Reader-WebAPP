@@ -22,6 +22,7 @@ from app.config import get_settings
 from app.worldpanel.checker import check_table
 from app.worldpanel.client import Credentials, WorldpanelClient, WorldpanelError
 from app.worldpanel.datastore import DataStore
+from app.worldpanel.local_answer import try_local_answer
 from app.worldpanel.data_explorer import (
     Clarification,
     DataExplorerCache,
@@ -540,10 +541,35 @@ async def export_current_csv(session_id: str) -> Response:
 async def pivot_plan(request: PivotPlanRequest) -> dict[str, object]:
     session = _session(request.session_id)
     _reset_progress(session, "Plan Pivot query")
-    _progress(session, "running", "Opening Pivot Screen and discovering dimensions")
     credentials = session.get("credentials")
     if not isinstance(credentials, Credentials):
         raise HTTPException(status_code=400, detail="Session credentials are unavailable")
+
+    # Local-first: if every cell the question needs was pulled before, answer
+    # from the local store in seconds — no browser, no queueing. Clarification
+    # answers always describe a live pull, so they skip this path.
+    if not request.clarification:
+        _progress(session, "running", "Checking the local data store")
+        local = None
+        ai_settings = _session_ai_settings(request.session_id)
+        if ai_settings.enabled:
+            try:
+                local = await try_local_answer(
+                    request.question, credentials.email, _datastore, AssistantClient(ai_settings)
+                )
+            except Exception:
+                logging.getLogger(__name__).warning("Local answer failed", exc_info=True)
+        if local:
+            _progress(session, "done", "Answered from the local data store", active=False)
+            return {
+                "ok": True,
+                "needs_clarification": False,
+                "local": True,
+                "answer": local["answer"],
+                "source": local["source"],
+            }
+
+    _progress(session, "running", "Opening Pivot Screen and discovering dimensions")
     pivot_session = _pivot_sessions.get_or_create(request.session_id)
     _restore_pivot_report(session, pivot_session)
     clarification = request.clarification.model_dump() if request.clarification else None
