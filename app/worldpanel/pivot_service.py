@@ -27,6 +27,7 @@ from app.worldpanel.planner import (
     canonical_kpi,
 )
 from app.worldpanel.schema import SchemaService
+from app.worldpanel.semantic_match import pick_option, related_indices
 from app.worldpanel.session import DataExplorerSession, open_persistent_data_explorer
 
 
@@ -74,7 +75,9 @@ class PivotQueryService:
         for item in tentative.get("axis_placements", []):
             if not isinstance(item, dict) or not item.get("dimension"):
                 continue
-            live = _resolve_dimension_name(str(item["dimension"]), dimensions)
+            live = await _resolve_dimension(
+                str(item["dimension"]), dimensions, assistant, question
+            )
             if not live:
                 continue
             axis = str(item.get("axis") or "column")
@@ -89,7 +92,9 @@ class PivotQueryService:
         ranking = _parse_ranking(tentative.get("ranking"))
         ranking_dim_live: str | None = None
         if ranking:
-            ranking_dim_live = _resolve_dimension_name(ranking["dimension"], dimensions)
+            ranking_dim_live = await _resolve_dimension(
+                ranking["dimension"], dimensions, assistant, question
+            )
             if ranking_dim_live and not any(
                 _normalize(axis["dimension"]) == _normalize(ranking_dim_live)
                 for axis in resolved_axes
@@ -114,6 +119,19 @@ class PivotQueryService:
                 kept_filters.append(flt)
             tentative["filters"] = kept_filters
 
+        # Resolve KPI terms and filter values against the report's REAL
+        # dropdown options (LLM association for unfamiliar shorthand); if a
+        # term matches nothing, proactively ask the user with the real options.
+        try:
+            dropdowns = tuple(await driver.read_dropdowns())
+        except Exception:
+            dropdowns = ()
+        dropdown_clarification = await _resolve_dropdown_terms(
+            tentative, dropdowns, assistant, question
+        )
+        if dropdown_clarification is not None:
+            return dropdown_clarification
+
         # Product terms come from the LLM (translated/natural names) and from any
         # member the user explicitly clarified. We always resolve them against
         # the live member tree ourselves, so the model only needs to understand
@@ -130,7 +148,10 @@ class PivotQueryService:
         ]
 
         resolved_selections: list[dict[str, Any]] = []
-        if not clarification and (extra_terms or _question_may_require_members(question)):
+        # Discovery runs unless the clarification itself pinned members: a
+        # calculation/KPI/filter clarification must NOT skip member discovery,
+        # or the product asked about in the original question would be lost.
+        if not clarified_selections and (extra_terms or _question_may_require_members(question)):
             resolved = await _discover_members_from_question(
                 question,
                 report["report_name"],
@@ -276,6 +297,112 @@ def _schema_for(session: DataExplorerSession, driver: Any) -> SchemaService:
     return schema
 
 
+async def _resolve_dimension(
+    name: str,
+    live_tags: tuple[DimensionTag, ...],
+    assistant: Any,
+    question: str,
+) -> str | None:
+    """Deterministic synonym resolution first; unfamiliar shorthand falls to
+    an LLM pick over the LIVE dimension labels (never an invented name)."""
+    live = _resolve_dimension_name(name, live_tags)
+    if live or assistant is None:
+        return live
+    labels = [tag.label for tag in live_tags]
+    picked = await pick_option(
+        assistant, question=question, term=name, options=labels, purpose="dimension"
+    )
+    return picked if picked in labels else None
+
+
+def _match_option(term: str, options: tuple[str, ...]) -> str | None:
+    """Deterministic option match: exact-normalized first, then containment."""
+    n = _normalize(term)
+    if not n:
+        return None
+    for option in options:
+        if _normalize(option) == n:
+            return option
+    for option in options:
+        normalized_option = _normalize(option)
+        if n in normalized_option or normalized_option in n:
+            return option
+    return None
+
+
+async def _resolve_dropdown_terms(
+    tentative: dict[str, Any],
+    dropdowns: tuple[Any, ...],
+    assistant: Any,
+    question: str,
+) -> PlanClarification | None:
+    """Resolve KPI terms and filter values against the report's REAL dropdown
+    options. Unfamiliar shorthand goes through an LLM pick over those options;
+    a term matching nothing becomes a clarification listing every real option,
+    so the user is proactively asked instead of hitting a dead end."""
+    kpi_dropdown = next((d for d in dropdowns if getattr(d, "role", "") == "kpi"), None)
+    if kpi_dropdown is not None and kpi_dropdown.options:
+        resolved_kpis: list[str] = []
+        for raw_term in tentative.get("kpis", []):
+            term = str(raw_term).strip()
+            if not term:
+                continue
+            target = _match_option(canonical_kpi(term), kpi_dropdown.options) or _match_option(
+                term, kpi_dropdown.options
+            )
+            if target is None and assistant is not None:
+                target = await pick_option(
+                    assistant,
+                    question=question,
+                    term=term,
+                    options=list(kpi_dropdown.options),
+                    purpose="KPI",
+                )
+            if target is None:
+                return PlanClarification(
+                    dimension="kpi",
+                    question=f"没有找到与“{term}”对应的指标。当前报表提供以下指标，请点选：",
+                    candidates=tuple((option,) for option in kpi_dropdown.options),
+                )
+            if target not in resolved_kpis:
+                resolved_kpis.append(target)
+        if resolved_kpis:
+            tentative["kpis"] = resolved_kpis
+    for flt in tentative.get("filters", []):
+        if not isinstance(flt, dict) or not flt.get("role") or not flt.get("value"):
+            continue
+        role = str(flt["role"])
+        value = str(flt["value"])
+        dropdown = next(
+            (
+                d
+                for d in dropdowns
+                if _normalize(getattr(d, "role", "")) == _normalize(role)
+                or _normalize(getattr(d, "dimension", "")) == _normalize(role)
+            ),
+            None,
+        )
+        if dropdown is None or not dropdown.options:
+            continue
+        target = _match_option(value, dropdown.options)
+        if target is None and assistant is not None:
+            target = await pick_option(
+                assistant,
+                question=question,
+                term=value,
+                options=list(dropdown.options),
+                purpose=f"{role} filter",
+            )
+        if target is None:
+            return PlanClarification(
+                dimension=role,
+                question=f"没有找到与“{value}”对应的 {role} 选项。当前报表提供以下选项，请点选：",
+                candidates=tuple((option,) for option in dropdown.options),
+            )
+        flt["value"] = target
+    return None
+
+
 def _parse_ranking(raw: Any) -> dict[str, Any] | None:
     """Validate the planner's ranking intent into {dimension, direction, top_n}."""
     if not isinstance(raw, dict):
@@ -364,6 +491,20 @@ def _apply_clarification(tentative: dict[str, Any], clarification: dict[str, Any
         return
     if dimension.casefold() == "calculation":
         tentative["calculation"] = member_path[-1]
+        tentative.pop("planner_fallback", None)
+        return
+    if dimension.casefold() == "kpi":
+        tentative["kpis"] = [member_path[-1]]
+        tentative.pop("planner_fallback", None)
+        return
+    if dimension.casefold() in ("channel", "duration", "geography"):
+        filters = [
+            flt
+            for flt in tentative.get("filters", [])
+            if str(flt.get("role") or "").casefold() != dimension.casefold()
+        ]
+        filters.append({"role": dimension.casefold(), "value": member_path[-1]})
+        tentative["filters"] = filters
         tentative.pop("planner_fallback", None)
         return
     selections = [
@@ -724,6 +865,29 @@ async def _discover_members_from_question(
     if selections:
         return selections
 
+    # Nothing matched: instead of a dead end, proactively offer every RELATED
+    # member as a clickable candidate so the user just picks one.
+    capped = members[:800]
+    related = await related_indices(
+        assistant,
+        question=question,
+        items=[f"{tag.label} > {' > '.join(node.path)}" for tag, node in capped],
+    )
+    if related:
+        # Clarification answers carry a single dimension, so keep the
+        # candidates from the dimension the top pick belongs to.
+        top_dimension = capped[related[0]][0].label
+        candidate_paths = tuple(
+            tuple(capped[index][1].path)
+            for index in related
+            if capped[index][0].label == top_dimension
+        )
+        if candidate_paths:
+            return PlanClarification(
+                dimension=top_dimension,
+                question="没有找到完全匹配的成员。你可能想查的是以下之一，请点选：",
+                candidates=candidate_paths,
+            )
     return PlanClarification(
         dimension="member",
         question="未能在当前报表中匹配到你说的成员，请换个更接近报表里的名称，或指明维度与成员名。",

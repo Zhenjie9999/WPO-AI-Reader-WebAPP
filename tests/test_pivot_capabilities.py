@@ -787,3 +787,151 @@ async def test_local_answer_orders_dates_chronologically(tmp_path):
     assert result is not None
     assert result["source"]["dates"] == ["17-Apr-26", "15-May-26"]
     store.close()
+
+
+class _JsonAI:
+    """Fake assistant answering each prompt with a fixed JSON payload."""
+
+    def __init__(self, payload):
+        self.payload = payload
+        self.prompts = []
+
+    async def chat(self, prompt):
+        import json as _json
+        self.prompts.append(prompt)
+        return _json.dumps(self.payload)
+
+
+@pytest.mark.asyncio
+async def test_semantic_pick_option_maps_shorthand_to_real_label():
+    from app.worldpanel.semantic_match import pick_option
+
+    options = ["Spend (RMB 000)", "Volume (000 kg)", "Penetration %"]
+    picked = await pick_option(
+        _JsonAI({"index": 2}), question="牙膏的pen%是多少", term="pen%",
+        options=options, purpose="KPI",
+    )
+    assert picked == "Penetration %"
+    # null / out-of-range / broken responses all resolve to None, never invent.
+    assert await pick_option(_JsonAI({"index": None}), question="q", term="t", options=options, purpose="KPI") is None
+    assert await pick_option(_JsonAI({"index": 99}), question="q", term="t", options=options, purpose="KPI") is None
+
+    class _Garbage:
+        async def chat(self, prompt):
+            return "not json at all"
+
+    assert await pick_option(_Garbage(), question="q", term="t", options=options, purpose="KPI") is None
+    assert await pick_option(None, question="q", term="t", options=options, purpose="KPI") is None
+
+
+@pytest.mark.asyncio
+async def test_semantic_related_indices_caps_dedupes_and_bounds():
+    from app.worldpanel.semantic_match import related_indices
+
+    items = [f"item{i}" for i in range(20)]
+    result = await related_indices(
+        _JsonAI({"indices": [3, 3, "5", 99, -1, 1, 2, 4, 6, 7, 8, 9]}),
+        question="q", items=items, cap=5,
+    )
+    assert result == [3, 5, 1, 2, 4]
+    assert await related_indices(None, question="q", items=items) == []
+
+
+@pytest.mark.asyncio
+async def test_dropdown_terms_resolve_via_alias_llm_or_clarify():
+    from app.worldpanel.pivot_models import ReportDropdown
+    from app.worldpanel.pivot_service import _resolve_dropdown_terms
+    from app.worldpanel.planner import PlanClarification
+
+    kpi_dd = ReportDropdown(index=0, role="kpi", dimension="Measures", selected="",
+                            options=("Spend (RMB 000)", "Volume (000 kg)", "Average Price"))
+    channel_dd = ReportDropdown(index=1, role="channel", dimension="Outlet", selected="",
+                                options=("Total Outlets", "Hypermarket", "CVS"))
+
+    # 1) Alias table hits deterministically — no LLM call needed.
+    tentative = {"kpis": ["销额"], "filters": []}
+    ai = _JsonAI({"index": 0})
+    assert await _resolve_dropdown_terms(tentative, (kpi_dd,), ai, "q") is None
+    assert tentative["kpis"] == ["Spend (RMB 000)"]
+    assert ai.prompts == []
+
+    # 2) Unfamiliar shorthand goes through the LLM pick over REAL options.
+    tentative = {"kpis": ["客单价"], "filters": []}
+    ai = _JsonAI({"index": 2})
+    assert await _resolve_dropdown_terms(tentative, (kpi_dd,), ai, "牙膏的客单价") is None
+    assert tentative["kpis"] == ["Average Price"]
+    assert len(ai.prompts) == 1
+
+    # 3) Nothing matches -> proactive clarification listing every real option.
+    tentative = {"kpis": ["神秘指标"], "filters": []}
+    result = await _resolve_dropdown_terms(tentative, (kpi_dd,), _JsonAI({"index": None}), "q")
+    assert isinstance(result, PlanClarification)
+    assert result.dimension == "kpi"
+    assert ("Average Price",) in result.candidates and len(result.candidates) == 3
+
+    # 4) Filter values resolve the same way ("HM" -> Hypermarket via LLM).
+    tentative = {"kpis": [], "filters": [{"role": "channel", "value": "HM"}]}
+    ai = _JsonAI({"index": 1})
+    assert await _resolve_dropdown_terms(tentative, (kpi_dd, channel_dd), ai, "HM渠道的销额") is None
+    assert tentative["filters"][0]["value"] == "Hypermarket"
+
+
+def test_apply_clarification_handles_kpi_and_filter_answers():
+    from app.worldpanel.pivot_service import _apply_clarification
+
+    tentative = {"kpis": ["神秘指标"], "filters": [{"role": "channel", "value": "?"}]}
+    _apply_clarification(tentative, {"dimension": "kpi", "member_path": ["Volume (000 kg)"]})
+    assert tentative["kpis"] == ["Volume (000 kg)"]
+    _apply_clarification(tentative, {"dimension": "channel", "member_path": ["CVS"]})
+    assert tentative["filters"] == [{"role": "channel", "value": "CVS"}]
+
+
+@pytest.mark.asyncio
+async def test_member_no_match_offers_related_candidates_to_click():
+    import json as _json
+    import app.worldpanel.pivot_service as svc
+    from app.worldpanel.planner import PlanClarification
+
+    tag, nodes = _product_fixture()
+
+    class _Schema:
+        async def all_members(self, report, t):
+            return nodes
+
+    class _Driver:
+        async def cancel_member_selection(self):
+            pass
+
+    class _AI:
+        async def chat(self, prompt):
+            if "RELATED" in prompt:
+                # Related lookup: Apple (index 1) and Cherry (index 2).
+                return _json.dumps({"indices": [1, 2]})
+            return _json.dumps({"indices": []})  # exact resolution finds nothing
+
+    result = await svc._discover_members_from_question(
+        "帮我查一下 mystery fruit 的销额", "R", (tag,), _Schema(), _Driver(),
+        extra_terms=(), assistant=_AI(),
+    )
+    assert isinstance(result, PlanClarification)
+    assert result.dimension == "Product"
+    assert ("Fruit", "Apple") in result.candidates
+    assert ("Fruit", "Cherry") in result.candidates
+    assert "你可能想查的是" in result.question
+
+
+@pytest.mark.asyncio
+async def test_resolve_dimension_falls_back_to_llm_pick():
+    from app.worldpanel.pivot_models import DimensionTag
+    from app.worldpanel.pivot_service import _resolve_dimension
+
+    live = (
+        DimensionTag("Product", "d1", "row", 0),
+        DimensionTag("Banner", "d2", "filter", 0),
+    )
+    # "卖场banner" is in no synonym table; the LLM picks the live label.
+    picked = await _resolve_dimension("bnr", live, _JsonAI({"index": 1}), "分bnr看销额")
+    assert picked == "Banner"
+    # Deterministic path still wins without the LLM.
+    assert await _resolve_dimension("Product", live, None, "q") == "Product"
+    assert await _resolve_dimension("bnr", live, None, "q") is None
