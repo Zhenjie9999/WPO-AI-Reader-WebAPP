@@ -562,3 +562,107 @@ def test_query_plan_payload_roundtrip_preserves_ranking():
 
     no_ranking = _query_plan_from_payload({"report_set": "S", "report": "R"})
     assert no_ranking.ranking is None
+
+
+@pytest.mark.asyncio
+async def test_llm_failure_falls_back_to_deterministic_matching():
+    """Regression: pivot_service used an undefined `logger` in the LLM-failure
+    path, so any Doubao timeout became a 500 instead of a graceful fallback."""
+    import app.worldpanel.pivot_service as svc
+
+    tag, nodes = _product_fixture()
+
+    class _Schema:
+        async def all_members(self, report, t):
+            return nodes
+
+    class _Driver:
+        async def cancel_member_selection(self):
+            pass
+
+    class _BrokenAI:
+        async def chat(self, prompt):
+            raise TimeoutError("ark endpoint timed out")
+
+    res = await svc._discover_members_from_question(
+        "榴莲的销售额", "R", (tag,), _Schema(), _Driver(),
+        extra_terms=("Durian",), assistant=_BrokenAI(),
+    )
+    assert [tuple(s["member_path"]) for s in res] == [("Fruit", "Durian")]
+
+
+def test_idle_sessions_are_swept_and_active_ones_refreshed():
+    import time as _time
+    import app.main as main
+
+    main._sessions.clear()
+    main._sessions["old"] = {"credentials": object(), "last_used": _time.monotonic() - main._SESSION_IDLE_SECONDS - 10}
+    main._sessions["fresh"] = {"credentials": object(), "last_used": _time.monotonic()}
+    try:
+        session = main._session("fresh")
+        assert "old" not in main._sessions  # credentials wiped
+        assert session["last_used"] >= _time.monotonic() - 5  # refreshed
+        with pytest.raises(Exception):
+            main._session("old")
+    finally:
+        main._sessions.clear()
+
+
+@pytest.mark.asyncio
+async def test_logout_wipes_session_and_credentials():
+    import app.main as main
+
+    main._sessions["s-logout"] = {"credentials": object(), "last_used": 0.0}
+    result = await main.logout(main.LogoutRequest(session_id="s-logout"))
+    assert result == {"ok": True}
+    assert "s-logout" not in main._sessions
+    # Logging out twice (or with an unknown id) is harmless.
+    again = await main.logout(main.LogoutRequest(session_id="s-logout"))
+    assert again == {"ok": True}
+
+
+def test_datastore_records_overwrites_and_isolates_accounts(tmp_path):
+    from app.worldpanel.datastore import DataStore
+
+    store = DataStore(str(tmp_path / "facts.sqlite3"))
+    store.record("a@x.com", "S", "R", "Spend (RMB 000)", [("Cherry", "15-May-26", 100.5)])
+    store.record("b@x.com", "S", "R", "Spend (RMB 000)", [("Cherry", "15-May-26", 999.0)])
+    # Re-pulling the same cell keeps the freshest value, no duplicates.
+    store.record("a@x.com", "S", "R", "Spend (RMB 000)", [("Cherry", "15-May-26", 101.0)])
+
+    rows_a = store.export_rows("a@x.com")
+    assert rows_a == [("S", "R", "Spend (RMB 000)", "Cherry", "15-May-26", 101.0)]
+    assert store.export_rows("b@x.com") == [("S", "R", "Spend (RMB 000)", "Cherry", "15-May-26", 999.0)]
+    store.close()
+
+    # Reopen: data survived the process "restart".
+    reopened = DataStore(str(tmp_path / "facts.sqlite3"))
+    assert reopened.export_rows("a@x.com")[0][-1] == 101.0
+    reopened.close()
+
+
+@pytest.mark.asyncio
+async def test_export_csv_merges_datastore_with_in_memory_rows(tmp_path, monkeypatch):
+    import app.main as main
+    from app.worldpanel.client import Credentials
+    from app.worldpanel.datastore import DataStore
+
+    store = DataStore(str(tmp_path / "facts.sqlite3"))
+    # A row pulled in an earlier (pre-restart) conversation, only on disk.
+    store.record("a@x.com", "S", "R", "Spend (RMB 000)", [("Durian", "15-May-26", 42.5)])
+    monkeypatch.setattr(main, "_datastore", store)
+
+    main._sessions["s-export"] = {
+        "credentials": Credentials(email="a@x.com", password="pw"),
+        "last_used": __import__("time").monotonic(),
+        "export_rows": {("S", "R", "Spend (RMB 000)", "Cherry", "15-May-26"): 100.5},
+    }
+    try:
+        response = await main.export_current_csv("s-export")
+        body = response.body.decode("utf-8")
+        assert "Durian" in body  # survived "restart" via the datastore
+        assert "Cherry" in body  # current conversation row
+        assert "42.5" in body and "100.5" in body
+    finally:
+        main._sessions.clear()
+        store.close()

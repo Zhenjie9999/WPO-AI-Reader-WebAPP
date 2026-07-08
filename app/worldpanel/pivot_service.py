@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import re
 from typing import Any
 
@@ -27,6 +28,9 @@ from app.worldpanel.planner import (
 )
 from app.worldpanel.schema import SchemaService
 from app.worldpanel.session import DataExplorerSession, open_persistent_data_explorer
+
+
+logger = logging.getLogger(__name__)
 
 
 class PivotQueryService:

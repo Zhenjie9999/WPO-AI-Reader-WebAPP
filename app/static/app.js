@@ -14,6 +14,7 @@ const aiStatusText = document.querySelector("#aiStatusText");
 const emailInput = document.querySelector("#emailInput");
 const passwordInput = document.querySelector("#passwordInput");
 const loginButton = document.querySelector("#loginButton");
+const logoutButton = document.querySelector("#logoutButton");
 const reportSetSelect = document.querySelector("#reportSetSelect");
 const enterButton = document.querySelector("#enterButton");
 const categorySelect = document.querySelector("#categorySelect");
@@ -279,7 +280,12 @@ saveAiButton.addEventListener("click", async () => {
   try {
     const configuration = currentAiConfiguration();
     const result = await postJson("/api/ai/test", configuration);
-    localStorage.setItem(AI_STORAGE_KEY, JSON.stringify(configuration));
+    // Never persist the API key: on a shared machine localStorage is readable
+    // by the next person. Only the endpoint/model choices are remembered.
+    localStorage.setItem(
+      AI_STORAGE_KEY,
+      JSON.stringify({ ...configuration, api_key: "", access_token: "" })
+    );
     if (sessionId) await bindSavedAiConfiguration();
     aiStatusText.textContent = `AI 可用 / Ready: ${result.ai.provider} / ${result.ai.model}`;
     aiText.textContent = `AI: ${result.ai.provider} / ${result.ai.model}`;
@@ -331,6 +337,7 @@ loginButton.addEventListener("click", async () => {
     finishProgress("done", `Loaded ${result.report_sets.length} Report Sets / 已读取 ${result.report_sets.length} 个 Report Set`);
     setStatus(`登录成功，读取到 ${result.report_sets.length} 个 Report Set / Login succeeded.`);
     addMessage("assistant", "请选择 Report Set，然后进入 Ready-to-Use Reports。\nChoose a Report Set, then enter Ready-to-Use Reports.");
+    logoutButton.hidden = false;
     bindSavedAiConfiguration().catch((error) => {
       aiStatusText.textContent = `AI 绑定失败 / Binding failed: ${error.message}`;
     });
@@ -340,6 +347,24 @@ loginButton.addEventListener("click", async () => {
     addMessage("assistant", `登录失败 / Login failed: ${error.message}`);
   } finally {
     loginButton.disabled = false;
+  }
+});
+
+logoutButton.addEventListener("click", async () => {
+  logoutButton.disabled = true;
+  try {
+    if (sessionId) {
+      await postJson("/api/logout", { session_id: sessionId });
+    }
+  } catch {
+    // Logout is best-effort: the server sweeps idle sessions anyway.
+  } finally {
+    sessionId = null;
+    passwordInput.value = "";
+    logoutButton.hidden = true;
+    logoutButton.disabled = false;
+    setStatus("已退出登录，服务器上的凭据已清除。 / Logged out; credentials wiped on the server.");
+    addMessage("assistant", "已退出登录。如需继续使用，请重新登录 Worldpanel。\nLogged out. Log in again to continue.");
   }
 });
 

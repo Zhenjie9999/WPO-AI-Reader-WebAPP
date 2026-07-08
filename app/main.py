@@ -5,6 +5,9 @@ import csv
 from dataclasses import asdict
 from datetime import datetime, timezone
 from io import StringIO
+import logging
+import os
+import time
 from typing import AsyncIterator
 from uuid import uuid4
 
@@ -18,6 +21,7 @@ from app.assistant import AISettings, AssistantClient, build_ai_status, summariz
 from app.config import get_settings
 from app.worldpanel.checker import check_table
 from app.worldpanel.client import Credentials, WorldpanelClient, WorldpanelError
+from app.worldpanel.datastore import DataStore
 from app.worldpanel.data_explorer import (
     Clarification,
     DataExplorerCache,
@@ -62,9 +66,13 @@ _cached_table: KeyMeasuresTable | MultiKpiTable | None = None
 _cached_report: dict[str, object] | None = None
 _sessions: dict[str, dict[str, object]] = {}
 _access_tokens: set[str] = set()
+# Idle sessions are swept so Worldpanel credentials never linger in memory
+# beyond a working day. Refreshed on every authenticated request.
+_SESSION_IDLE_SECONDS = int(os.getenv("WPO_SESSION_IDLE_MINUTES", "480")) * 60
 _query_cache = DataExplorerCache("runtime/query-cache.json")
 _pivot_sessions = DataExplorerSessionManager()
 _pivot_result_cache = VerifiedResultCache()
+_datastore = DataStore(os.getenv("WPO_DATA_DB", "runtime/wpo-data.sqlite3"))
 _MAX_PROGRESS_EVENTS = 30
 
 
@@ -223,6 +231,19 @@ async def login(request: LoginRequest) -> dict[str, object]:
     return await _login_with_credentials(Credentials(email=request.email, password=request.password))
 
 
+class LogoutRequest(BaseModel):
+    session_id: str
+
+
+@app.post("/api/logout")
+async def logout(request: LogoutRequest) -> dict[str, object]:
+    """Wipe the session immediately: credentials leave server memory and the
+    persistent browser session is discarded."""
+    _sessions.pop(request.session_id, None)
+    await _pivot_sessions.discard(request.session_id)
+    return {"ok": True}
+
+
 @app.post("/api/login-env")
 async def login_from_env() -> dict[str, object]:
     settings = get_settings()
@@ -244,7 +265,7 @@ async def _login_with_credentials(credentials: Credentials) -> dict[str, object]
         raise HTTPException(status_code=500, detail=f"Login failed: {exc}") from exc
 
     session_id = str(uuid4())
-    _sessions[session_id] = {"credentials": credentials}
+    _sessions[session_id] = {"credentials": credentials, "last_used": time.monotonic()}
     _reset_progress(_sessions[session_id], "Worldpanel login")
     _progress(_sessions[session_id], "done", "Worldpanel login completed")
     _pivot_sessions.get_or_create(session_id)
@@ -473,11 +494,23 @@ async def export_current_csv(session_id: str) -> Response:
     output = StringIO()
     writer = csv.writer(output)
     writer.writerow(["report_set", "report_name", "product", "date", "metric", "value"])
+    # Whole-history export: the durable local store (survives restarts) merged
+    # with this conversation's in-memory rows, which win on overlap.
+    combined: dict[tuple[str, str, str, str, str], float] = {}
+    credentials = session.get("credentials")
+    if isinstance(credentials, Credentials):
+        try:
+            for report_set, report_name, metric, product, date_label, value in _datastore.export_rows(
+                credentials.email
+            ):
+                combined[(report_set, report_name, metric, product, date_label)] = value
+        except Exception:
+            logging.getLogger(__name__).warning("Datastore read failed", exc_info=True)
     export_rows = session.get("export_rows")
-    if isinstance(export_rows, dict) and export_rows:
-        # Whole-conversation export: every (report, metric, product, date) ever
-        # pulled, not just the latest question.
-        for (report_set, report_name, metric, product, date_label), value in export_rows.items():
+    if isinstance(export_rows, dict):
+        combined.update(export_rows)
+    if combined:
+        for (report_set, report_name, metric, product, date_label), value in combined.items():
             writer.writerow([report_set, report_name, product, date_label, metric, format_plain(value)])
     else:
         # Fallback: the legacy single cached table.
@@ -654,6 +687,8 @@ async def pivot_execute(request: PivotExecuteRequest) -> dict[str, object]:
     converted = _activate_pivot_tables(result.tables, current_report, session)
     # Accumulate across the whole conversation so CSV export covers every query.
     _accumulate_export_rows(session, converted, current_report)
+    # Land the cells in the local store too, so pulled data survives restarts.
+    _record_datastore(credentials.email, converted, current_report)
 
     if request.question:
         # Always answer from the float-valued pivot result so decimals survive
@@ -796,10 +831,26 @@ def _answer_from_table(question: str, table: KeyMeasuresTable | MultiKpiTable) -
 
 
 def _session(session_id: str) -> dict[str, object]:
+    _sweep_idle_sessions()
     session = _sessions.get(session_id)
     if not session:
         raise HTTPException(status_code=400, detail="登录会话不存在，请重新登录。")
+    session["last_used"] = time.monotonic()
     return session
+
+
+def _sweep_idle_sessions() -> None:
+    """Drop sessions idle beyond the TTL so credentials do not linger in
+    memory. The browser side is reclaimed by DataExplorerSessionManager's own
+    TTL; this only wipes the HTTP-session dict (credentials, caches)."""
+    now = time.monotonic()
+    expired = [
+        session_id
+        for session_id, session in _sessions.items()
+        if now - float(session.get("last_used") or now) > _SESSION_IDLE_SECONDS
+    ]
+    for session_id in expired:
+        _sessions.pop(session_id, None)
 
 
 def _require_access_token(access_token: str | None) -> None:
@@ -850,6 +901,31 @@ def _restore_pivot_report(http_session: dict[str, object], pivot_session) -> Non
             "report_parameter": str(report.get("report_parameter", "")),
             "report_name": str(report.get("report_name", "")),
         }
+
+
+def _record_datastore(
+    account: str,
+    converted: dict[str, KeyMeasuresTable],
+    report: dict[str, object],
+) -> None:
+    """Durability is best-effort: a broken disk must never fail the answer."""
+    try:
+        report_set = str(report.get("report_set", ""))
+        report_name = str(report.get("report_name", ""))
+        for metric, table in converted.items():
+            _datastore.record(
+                account,
+                report_set,
+                report_name,
+                metric,
+                (
+                    (product, date_label, value)
+                    for date_label, products in table.rows.items()
+                    for product, value in products.items()
+                ),
+            )
+    except Exception:
+        logging.getLogger(__name__).warning("Datastore write failed", exc_info=True)
 
 
 def _accumulate_export_rows(
