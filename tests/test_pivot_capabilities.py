@@ -935,3 +935,90 @@ async def test_resolve_dimension_falls_back_to_llm_pick():
     # Deterministic path still wins without the LLM.
     assert await _resolve_dimension("Product", live, None, "q") == "Product"
     assert await _resolve_dimension("bnr", live, None, "q") is None
+
+
+@pytest.mark.asyncio
+async def test_assistant_retries_transient_failures_once():
+    import httpx
+    from app.assistant import AISettings, AssistantClient
+
+    settings = AISettings(provider="doubao", model="m", api_key="k", base_url="http://x", timeout_seconds=5)
+
+    class _OkResponse:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"choices": [{"message": {"content": "ok"}}]}
+
+    calls = {"n": 0}
+
+    async def flaky_post(url, headers=None, json=None, timeout=None):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise httpx.ConnectError("cross-border blip")
+        return _OkResponse()
+
+    result = await AssistantClient(settings, post=flaky_post).chat("hi")
+    assert result == "ok" and calls["n"] == 2
+
+    class _ErrorResponse:
+        def raise_for_status(self):
+            raise httpx.HTTPStatusError(
+                "503", request=httpx.Request("POST", "http://x"), response=httpx.Response(503)
+            )
+
+    calls["n"] = 0
+
+    async def flaky_500(url, headers=None, json=None, timeout=None):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return _ErrorResponse()
+        return _OkResponse()
+
+    assert await AssistantClient(settings, post=flaky_500).chat("hi") == "ok"
+    assert calls["n"] == 2
+
+    # Timeouts are NOT retried — a second 60s wait would double user latency.
+    async def timeout_post(url, headers=None, json=None, timeout=None):
+        calls["t"] = calls.get("t", 0) + 1
+        raise httpx.ReadTimeout("slow model")
+
+    with pytest.raises(httpx.ReadTimeout):
+        await AssistantClient(settings, post=timeout_post).chat("hi")
+    assert calls["t"] == 1
+
+
+@pytest.mark.asyncio
+async def test_duplicate_label_members_become_clickable_candidates_without_ai():
+    """Regression for the TOTAL CREST dead end: duplicate labels made the
+    deterministic matcher refuse (ambiguous), and with the LLM down the user
+    got a dead-end message. Now the tied candidates are offered to click."""
+    import app.worldpanel.pivot_service as svc
+    from app.worldpanel.planner import PlanClarification
+    from app.worldpanel.pivot_models import DimensionTag
+
+    tag = DimensionTag(label="Product", dimension_id="[Dim1]", axis="column", position=0)
+    nodes = (
+        _make_node("Total CREST", ["Oral Care", "Total CREST"]),
+        _make_node("Total CREST", ["Total CREST"]),  # duplicate root — real WPO shape
+        _make_node("CREST TM", ["CREST TM"]),
+    )
+
+    class _Schema:
+        async def all_members(self, report, t):
+            return nodes
+
+    class _Driver:
+        async def cancel_member_selection(self):
+            pass
+
+    result = await svc._discover_members_from_question(
+        "TOTAL CREST在12-Jun-26的渗透率是多少?", "R", (tag,), _Schema(), _Driver(),
+        extra_terms=(), assistant=None,
+    )
+    assert isinstance(result, PlanClarification)
+    assert result.dimension == "Product"
+    assert ("Oral Care", "Total CREST") in result.candidates
+    assert ("Total CREST",) in result.candidates
+    assert "请点选" in result.question

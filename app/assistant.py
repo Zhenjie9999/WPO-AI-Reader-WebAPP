@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
@@ -65,24 +66,43 @@ class AssistantClient:
             "Content-Type": "application/json",
         }
 
+        # The ARK endpoint is reached cross-border from the server, so brief
+        # connection blips and 429/5xx happen. Retry ONCE on those; timeouts
+        # are not retried (a second 60s wait would double user latency).
+        last_error: Exception | None = None
+        for attempt in range(2):
+            try:
+                response = await self._send(payload, headers)
+                response.raise_for_status()
+                return _extract_message_content(response.json())
+            except (httpx.ConnectError, httpx.ConnectTimeout, httpx.RemoteProtocolError) as exc:
+                last_error = exc
+            except httpx.HTTPStatusError as exc:
+                status = exc.response.status_code
+                if attempt == 0 and (status == 429 or status >= 500):
+                    last_error = exc
+                else:
+                    raise
+            if attempt == 0:
+                await asyncio.sleep(1)
+        assert last_error is not None
+        raise last_error
+
+    async def _send(self, payload: dict[str, Any], headers: dict[str, str]) -> Any:
         if self._post:
-            response = await self._post(
+            return await self._post(
                 self.settings.base_url,
                 headers=headers,
                 json=payload,
                 timeout=self.settings.timeout_seconds,
             )
-        else:
-            async with httpx.AsyncClient() as client:
-                response = await client.post(
-                    self.settings.base_url,
-                    headers=headers,
-                    json=payload,
-                    timeout=self.settings.timeout_seconds,
-                )
-
-        response.raise_for_status()
-        return _extract_message_content(response.json())
+        async with httpx.AsyncClient() as client:
+            return await client.post(
+                self.settings.base_url,
+                headers=headers,
+                json=payload,
+                timeout=self.settings.timeout_seconds,
+            )
 
 
 def _extract_message_content(payload: dict[str, Any]) -> str:

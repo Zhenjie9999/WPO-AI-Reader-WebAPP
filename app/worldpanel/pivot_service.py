@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import logging
 import re
 from typing import Any
@@ -162,6 +163,13 @@ class PivotQueryService:
                 assistant=assistant,
             )
             if isinstance(resolved, PlanClarification):
+                # Make degradation visible: "worked yesterday, not today" is
+                # almost always a transient AI outage, not the user's fault.
+                if tentative.get("planner_fallback") or assistant is None:
+                    return replace(
+                        resolved,
+                        question="（AI 匹配服务暂时不可用，已降级为规则匹配。）" + resolved.question,
+                    )
                 return resolved
             resolved_selections = resolved
 
@@ -809,6 +817,35 @@ def _resolve_terms_deterministic(
     return selections
 
 
+def _ambiguous_candidates(
+    normalized_question: str,
+    members: list,
+    terms: list[str],
+    cap: int = 8,
+) -> list[tuple[str, tuple[str, ...]]]:
+    """Members a term matched EQUALLY well (so deterministic resolution refused
+    to pick one). These become clickable clarification candidates — the no-AI
+    answer to duplicate/near-duplicate labels in real WPO trees."""
+    results: list[tuple[str, tuple[str, ...]]] = []
+    seen: set[tuple[str, tuple[str, ...]]] = set()
+    for term in terms:
+        scored = [(tag, node, _term_match(node.label, term, normalized_question)) for tag, node in members]
+        best = max((score for _, _, score in scored), default=0)
+        if best <= 0:
+            continue
+        top = [(tag, node) for tag, node, score in scored if score == best]
+        unique = list(dict.fromkeys((tag.label, tuple(node.path)) for tag, node in top))
+        if len(unique) < 2:
+            continue  # resolved (or nothing) — not an ambiguity
+        for key in unique:
+            if key not in seen:
+                seen.add(key)
+                results.append(key)
+            if len(results) >= cap:
+                return results
+    return results
+
+
 async def _discover_members_from_question(
     question: str,
     report: str,
@@ -865,8 +902,21 @@ async def _discover_members_from_question(
     if selections:
         return selections
 
-    # Nothing matched: instead of a dead end, proactively offer every RELATED
-    # member as a clickable candidate so the user just picks one.
+    # Nothing selected. Two proactive rescues before any dead end:
+    # 1) deterministic ambiguity — a term matched SEVERAL members equally well
+    #    (duplicate labels are a real WPO tree shape); offer those, no AI needed;
+    # 2) LLM related lookup — offer members related to the question.
+    ambiguous = _ambiguous_candidates(normalized_question, members, terms)
+    if ambiguous:
+        top_dimension = ambiguous[0][0]
+        candidate_paths = tuple(
+            path for dimension, path in ambiguous if dimension == top_dimension
+        )
+        return PlanClarification(
+            dimension=top_dimension,
+            question="报表里有多个同名或相近的成员，请点选你要查的那一个：",
+            candidates=candidate_paths,
+        )
     capped = members[:800]
     related = await related_indices(
         assistant,
